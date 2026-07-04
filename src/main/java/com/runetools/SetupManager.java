@@ -1,0 +1,243 @@
+package com.runetools;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.function.Consumer;
+import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.config.ConfigManager;
+import okhttp3.Call;
+import okhttp3.Callback;
+import okhttp3.Response;
+
+/**
+ * Pulls the user's gear setups from RuneTools, caches them (persisted via ConfigManager so they
+ * survive restarts), and tracks which one is "active". Polling uses a full pull with an
+ * {@code If-None-Match} ETag, so an unchanged server returns 304 (near-free).
+ */
+@Slf4j
+class SetupManager
+{
+	private static final String GROUP = RuneToolsConfig.GROUP;
+	private static final String KEY_SETUPS = "setups";
+	private static final String KEY_ETAG = "setupsEtag";
+
+	private final ConfigManager configManager;
+	private final RuneToolsApiClient api;
+
+	private volatile List<GearSetup> setups = new ArrayList<>();
+	private volatile String etag;
+	private volatile long activeId = -1;
+	private volatile Runnable onChange = () -> { };
+	private volatile Consumer<Long> onDelete = id -> { };
+
+	SetupManager(ConfigManager configManager, RuneToolsApiClient api)
+	{
+		this.configManager = configManager;
+		this.api = api;
+		load();
+	}
+
+	void setOnChange(Runnable r)
+	{
+		this.onChange = r != null ? r : () -> { };
+	}
+
+	void setOnDelete(Consumer<Long> c)
+	{
+		this.onDelete = c != null ? c : id -> { };
+	}
+
+	List<GearSetup> getSetups()
+	{
+		return setups;
+	}
+
+	GearSetup getActive()
+	{
+		long id = activeId;
+		for (GearSetup s : setups)
+		{
+			if (s.getId() == id)
+			{
+				return s;
+			}
+		}
+		return null;
+	}
+
+	void setActive(long id)
+	{
+		activeId = id;
+	}
+
+	void clearActive()
+	{
+		activeId = -1;
+	}
+
+	void poll()
+	{
+		api.getSetups(etag, new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				log.debug("RuneTools: setups sync failed (will retry): {}", ex.getMessage());
+			}
+
+			@Override
+			public void onResponse(Call call, Response resp)
+			{
+				try (Response r = resp)
+				{
+					if (r.code() == 304)
+					{
+						return;   // unchanged
+					}
+					if (r.code() == 401)
+					{
+						return;   // handled by other paths / panel status
+					}
+					if (!r.isSuccessful())
+					{
+						log.debug("RuneTools: setups sync HTTP {}", r.code());
+						return;
+					}
+					String body = r.body() != null ? r.body().string() : "";
+					JsonObject o = new JsonParser().parse(body).getAsJsonObject();
+					JsonArray arr = o.getAsJsonArray("setups");
+					List<GearSetup> parsed = new ArrayList<>();
+					if (arr != null)
+					{
+						for (JsonElement e : arr)
+						{
+							if (e.isJsonObject())
+							{
+								parsed.add(GearSetup.fromJson(e.getAsJsonObject()));
+							}
+						}
+					}
+					// Diff old vs new ids so setups removed on the site drop their bank tag + layout.
+					Set<Long> removed = new HashSet<>();
+					for (GearSetup s : setups)
+					{
+						removed.add(s.getId());
+					}
+					for (GearSetup s : parsed)
+					{
+						removed.remove(s.getId());
+					}
+					setups = parsed;
+					for (Long id : removed)
+					{
+						onDelete.accept(id);
+					}
+					if (o.has("etag") && !o.get("etag").isJsonNull())
+					{
+						etag = o.get("etag").getAsString();
+					}
+					persist(arr);
+					onChange.run();
+					log.info("RuneTools: {} gear setup(s) synced", parsed.size());
+				}
+				catch (Exception ex)
+				{
+					log.debug("RuneTools: could not parse setups: {}", ex.getMessage());
+				}
+			}
+		});
+	}
+
+	void pushCreate(GearSetup s)
+	{
+		api.createSetup(s, refreshCallback("create"));
+	}
+
+	void pushUpdate(GearSetup s)
+	{
+		api.updateSetup(s.getId(), s, refreshCallback("update"));
+	}
+
+	void pushDelete(long id)
+	{
+		api.deleteSetup(id, refreshCallback("delete"));
+	}
+
+	private Callback refreshCallback(String what)
+	{
+		return new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				log.debug("RuneTools: setup {} failed: {}", what, ex.getMessage());
+			}
+
+			@Override
+			public void onResponse(Call call, Response resp)
+			{
+				try (Response r = resp)
+				{
+					if (r.isSuccessful())
+					{
+						etag = null;   // force a fresh pull so the panel reflects the write
+						poll();
+					}
+					else
+					{
+						log.debug("RuneTools: setup {} HTTP {}", what, r.code());
+					}
+				}
+			}
+		};
+	}
+
+	private void persist(JsonArray arr)
+	{
+		try
+		{
+			configManager.setConfiguration(GROUP, KEY_SETUPS, arr != null ? arr.toString() : "[]");
+			if (etag != null)
+			{
+				configManager.setConfiguration(GROUP, KEY_ETAG, etag);
+			}
+		}
+		catch (Exception ex)
+		{
+			log.debug("RuneTools: could not persist setups: {}", ex.getMessage());
+		}
+	}
+
+	private void load()
+	{
+		try
+		{
+			etag = configManager.getConfiguration(GROUP, KEY_ETAG);
+			String raw = configManager.getConfiguration(GROUP, KEY_SETUPS);
+			if (raw != null && !raw.isEmpty())
+			{
+				JsonArray arr = new JsonParser().parse(raw).getAsJsonArray();
+				List<GearSetup> parsed = new ArrayList<>();
+				for (JsonElement e : arr)
+				{
+					if (e.isJsonObject())
+					{
+						parsed.add(GearSetup.fromJson(e.getAsJsonObject()));
+					}
+				}
+				setups = parsed;
+			}
+		}
+		catch (Exception ex)
+		{
+			log.debug("RuneTools: could not load cached setups: {}", ex.getMessage());
+		}
+	}
+}

@@ -1,0 +1,33 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IntelliJ / Eclipse
+.idea/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
+bin/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Local dev convenience with a machine-specific JDK path
+run.ps1
+
+# Local RuneLite runtime data if any leaks into the repo
+runelite/
+
+# Fetched third-party source used only for research (not ours to redistribute)
+.research/
+
+# Design/scratch docs kept local
+GEAR_SETUPS_PLAN.md
+PLAN.md
+ROADMAP.md
+TESTING.md

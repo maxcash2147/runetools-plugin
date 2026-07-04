@@ -1,0 +1,148 @@
+package com.runetools;
+
+import net.runelite.client.config.Config;
+import net.runelite.client.config.ConfigGroup;
+import net.runelite.client.config.ConfigItem;
+import net.runelite.client.config.ConfigSection;
+
+@ConfigGroup(RuneToolsConfig.GROUP)
+public interface RuneToolsConfig extends Config
+{
+	String GROUP = "runetools";
+
+	@ConfigSection(
+		name = "Connection",
+		description = "How the plugin talks to the RuneTools site",
+		position = 0
+	)
+	String connectionSection = "connection";
+
+	@ConfigSection(
+		name = "What to sync",
+		description = "Which data the plugin uploads",
+		position = 1
+	)
+	String syncSection = "sync";
+
+	@ConfigItem(
+		keyName = "apiKey",
+		name = "API key",
+		description = "Paste the key you generated on gecharts.com (Account → Connect RuneLite). Treat it like a password.",
+		secret = true,
+		section = connectionSection,
+		position = 0
+	)
+	default String apiKey()
+	{
+		return "";
+	}
+
+	@ConfigItem(
+		keyName = "serverUrl",
+		name = "Server URL",
+		description = "The RuneTools server to sync with. Leave as the default unless you are testing against a local/staging server.",
+		section = connectionSection,
+		position = 1
+	)
+	default String serverUrl()
+	{
+		return "https://gecharts.com";
+	}
+
+	@ConfigItem(
+		keyName = "consent",
+		name = "I consent to sending my account data to RuneTools",
+		description = "The plugin sends nothing until this is enabled.",
+		warning = "This plugin sends your account name (RSN), account hash, coin balance, "
+			+ "completed Grand Exchange trades, open GE offers, inventory, and your current world "
+			+ "number and members-world status (and, only if you enable \"Include bank\", your bank "
+			+ "contents) to the RuneTools server, which is NOT controlled or verified by the "
+			+ "RuneLite developers. Your API key is stored locally and sent only to that server "
+			+ "over HTTPS. Enable only if you accept this.",
+		section = connectionSection,
+		position = 2
+	)
+	default boolean consent()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "syncTrades",
+		name = "Sync GE trades",
+		description = "Upload completed Grand Exchange buys and sells for automatic profit tracking on the site.",
+		section = syncSection,
+		position = 0
+	)
+	default boolean syncTrades()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "syncState",
+		name = "Sync account state",
+		description = "Upload coins, open GE offers and inventory so flip suggestions fit your real bankroll and free slots.",
+		section = syncSection,
+		position = 1
+	)
+	default boolean syncState()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "syncBank",
+		name = "Include bank",
+		description = "Also include bank contents (only read when you open your bank). Powers holdings P/L and the best-loadout-from-bank feature.",
+		section = syncSection,
+		position = 2
+	)
+	default boolean syncBank()
+	{
+		return false;
+	}
+
+	@ConfigSection(
+		name = "Gear setups",
+		description = "Sync loadouts from RuneTools and filter your bank to them",
+		position = 2
+	)
+	String setupsSection = "setups";
+
+	@ConfigItem(
+		keyName = "syncSetups",
+		name = "Sync gear setups",
+		description = "Pull the gear/inventory loadouts you saved on RuneTools so you can filter your bank to them in-game.",
+		section = setupsSection,
+		position = 0
+	)
+	default boolean syncSetups()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "setupFuzzyMatch",
+		name = "Fuzzy item matching",
+		description = "Match item variations (charged/uncharged, (i), recolours) when filtering the bank, so a banked variant of a setup item still shows.",
+		section = setupsSection,
+		position = 1
+	)
+	default boolean setupFuzzyMatch()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "setupBankLayout",
+		name = "Arrange bank to setup",
+		description = "Position bank items like the gear setup (equipment on the left, inventory on the right). Off = filter only.",
+		section = setupsSection,
+		position = 2
+	)
+	default boolean setupBankLayout()
+	{
+		return true;
+	}
+}
