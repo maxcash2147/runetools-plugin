@@ -52,64 +52,111 @@ public class GearSetup
 		return true;
 	}
 
-	/** Item ids the bank filter/layout should cover: worn equipment + inventory + rune pouch. */
+	/** Item ids the bank filter/layout should cover: equipment + inventory + rune pouch + quiver + additional. */
 	public Collection<Integer> filterItemIds()
 	{
 		List<Integer> ids = new ArrayList<>();
 		if (equipment != null)
 		{
-			ids.addAll(equipment.values());
-		}
-		if (inventory != null)
-		{
-			for (GearSetupItem it : inventory)
+			for (Integer id : equipment.values())
 			{
-				ids.add(it.getItemId());
+				if (id != null && id > 0)
+				{
+					ids.add(id);
+				}
 			}
 		}
-		if (runePouch != null)
-		{
-			for (GearSetupItem it : runePouch)
-			{
-				ids.add(it.getItemId());
-			}
-		}
-		if (quiver != null)
-		{
-			for (GearSetupItem it : quiver)
-			{
-				ids.add(it.getItemId());
-			}
-		}
-		if (additional != null)
-		{
-			for (GearSetupItem it : additional)
-			{
-				ids.add(it.getItemId());
-			}
-		}
+		addItemIds(ids, inventory);
+		addItemIds(ids, runePouch);
+		addItemIds(ids, quiver);
+		addItemIds(ids, additional);
 		return ids;
 	}
+
+	private static void addItemIds(List<Integer> ids, List<GearSetupItem> items)
+	{
+		if (items == null)
+		{
+			return;
+		}
+		for (GearSetupItem it : items)
+		{
+			if (it.getItemId() > 0)   // skip positional empty slots
+			{
+				ids.add(it.getItemId());
+			}
+		}
+	}
+
+	/**
+	 * Same items as {@link #filterItemIds()} but aggregated to id -> total quantity (equipment counts
+	 * as one each). Used for the "missing items / cost to complete" diff so a stack of 1000 runes is
+	 * priced as 1000, and the same id appearing in two lists is counted once.
+	 */
+	public Map<Integer, Integer> filterItemCounts()
+	{
+		LinkedHashMap<Integer, Integer> counts = new LinkedHashMap<>();
+		if (equipment != null)
+		{
+			for (Integer id : equipment.values())
+			{
+				if (id != null && id > 0)
+				{
+					counts.merge(id, 1, Integer::sum);
+				}
+			}
+		}
+		addItemCounts(counts, inventory);
+		addItemCounts(counts, runePouch);
+		addItemCounts(counts, quiver);
+		addItemCounts(counts, additional);
+		return counts;
+	}
+
+	private static void addItemCounts(Map<Integer, Integer> counts, List<GearSetupItem> items)
+	{
+		if (items == null)
+		{
+			return;
+		}
+		for (GearSetupItem it : items)
+		{
+			if (it.getItemId() > 0)   // skip positional empty slots
+			{
+				counts.merge(it.getItemId(), Math.max(1, it.getQty()), Integer::sum);
+			}
+		}
+	}
+
+	/** Upper bound on any single item list from an (untrusted) setup, to cap Swing/render work. */
+	private static final int MAX_ITEMS = 500;
 
 	static GearSetup fromJson(JsonObject o)
 	{
 		GearSetup s = new GearSetup();
-		s.id = o.get("id").getAsLong();
+		s.id = o.has("id") && !o.get("id").isJsonNull() ? asLong(o.get("id"), 0L) : 0L;
 		s.name = str(o, "name");
 		s.source = str(o, "source");
 		s.style = str(o, "style");
-		s.twoHanded = o.has("two_handed") && !o.get("two_handed").isJsonNull() && o.get("two_handed").getAsBoolean();
-		s.updatedAt = o.has("updated_at") && !o.get("updated_at").isJsonNull()
-			? (long) o.get("updated_at").getAsDouble() : 0L;
+		s.twoHanded = o.has("two_handed") && !o.get("two_handed").isJsonNull() && asBool(o.get("two_handed"));
+		s.updatedAt = o.has("updated_at") && !o.get("updated_at").isJsonNull() ? asEpoch(o.get("updated_at")) : 0L;
 
 		JsonElement eq = o.get("equipment");
 		if (eq != null && eq.isJsonObject())
 		{
 			for (Map.Entry<String, JsonElement> e : eq.getAsJsonObject().entrySet())
 			{
+				if (s.equipment.size() >= MAX_ITEMS)
+				{
+					break;
+				}
 				if (!e.getValue().isJsonNull())
 				{
-					s.equipment.put(e.getKey(), e.getValue().getAsInt());
+					int id = asInt(e.getValue(), 0);
+					if (id > 0)
+					{
+						s.equipment.put(e.getKey(), id);
+					}
 				}
 			}
 		}
@@ -117,17 +164,21 @@ public class GearSetup
 		s.runePouch = items(o, "rune_pouch");
 		s.quiver = items(o, "quiver");
 		s.additional = items(o, "additional");
-		s.spellbook = o.has("spellbook") && !o.get("spellbook").isJsonNull() ? o.get("spellbook").getAsInt() : -1;
-		s.monsterId = o.has("monster_id") && !o.get("monster_id").isJsonNull() ? o.get("monster_id").getAsInt() : null;
+		s.spellbook = o.has("spellbook") && !o.get("spellbook").isJsonNull() ? asInt(o.get("spellbook"), -1) : -1;
+		s.monsterId = o.has("monster_id") && !o.get("monster_id").isJsonNull() ? asInt(o.get("monster_id"), 0) : null;
 		s.fuzzy = new HashSet<>();
 		JsonElement fz = o.get("fuzzy");
 		if (fz != null && fz.isJsonArray())
 		{
 			for (JsonElement e : fz.getAsJsonArray())
 			{
-				if (!e.isJsonNull())
+				if (!e.isJsonNull() && s.fuzzy.size() < MAX_ITEMS)
 				{
-					s.fuzzy.add(e.getAsInt());
+					int id = asInt(e, 0);
+					if (id > 0)
+					{
+						s.fuzzy.add(id);
+					}
 				}
 			}
 		}
@@ -209,12 +260,22 @@ public class GearSetup
 		{
 			for (JsonElement e : el.getAsJsonArray())
 			{
-				if (e.isJsonObject())
+				if (out.size() >= MAX_ITEMS)
 				{
-					JsonObject j = e.getAsJsonObject();
-					out.add(new GearSetupItem(j.get("item_id").getAsInt(),
-						j.has("qty") ? j.get("qty").getAsInt() : 1));
+					break;
 				}
+				if (!e.isJsonObject())
+				{
+					continue;
+				}
+				JsonObject j = e.getAsJsonObject();
+				if (!j.has("item_id") || j.get("item_id").isJsonNull())
+				{
+					continue;   // no item id
+				}
+				int itemId = asInt(j.get("item_id"), 0);
+				int qty = j.has("qty") && !j.get("qty").isJsonNull() ? asInt(j.get("qty"), 1) : 1;
+				out.add(new GearSetupItem(itemId, qty));
 			}
 		}
 		return out;
@@ -223,6 +284,65 @@ public class GearSetup
 	private static String str(JsonObject o, String key)
 	{
 		JsonElement e = o.get(key);
-		return e != null && !e.isJsonNull() ? e.getAsString() : null;
+		if (e == null || e.isJsonNull())
+		{
+			return null;
+		}
+		try
+		{
+			return e.getAsString();   // a nested object/array would throw - treat as absent
+		}
+		catch (RuntimeException ex)
+		{
+			return null;
+		}
+	}
+
+	private static long asLong(JsonElement e, long fallback)
+	{
+		try
+		{
+			return e.getAsLong();
+		}
+		catch (RuntimeException ex)
+		{
+			return fallback;
+		}
+	}
+
+	private static long asEpoch(JsonElement e)
+	{
+		try
+		{
+			return (long) e.getAsDouble();
+		}
+		catch (RuntimeException ex)
+		{
+			return 0L;
+		}
+	}
+
+	private static boolean asBool(JsonElement e)
+	{
+		try
+		{
+			return e.getAsBoolean();
+		}
+		catch (RuntimeException ex)
+		{
+			return false;
+		}
+	}
+
+	private static int asInt(JsonElement e, int fallback)
+	{
+		try
+		{
+			return e.getAsInt();
+		}
+		catch (RuntimeException ex)
+		{
+			return fallback;
+		}
 	}
 }

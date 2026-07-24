@@ -96,17 +96,20 @@ class LoadoutReader
 		}
 		s.setEquipment(eq);
 
-		// (3) inventory
+		// (3) inventory (positional: preserve the real slot layout, empty slots as blanks, trim the tail)
 		ItemContainer inv = client.getItemContainer(InventoryID.INV);
 		List<GearSetupItem> invList = new ArrayList<>();
 		if (inv != null)
 		{
 			for (Item it : inv.getItems())
 			{
-				if (it.getId() > 0)
-				{
-					invList.add(new GearSetupItem(it.getId(), Math.max(1, it.getQuantity())));
-				}
+				invList.add(it.getId() > 0
+					? new GearSetupItem(it.getId(), Math.max(1, it.getQuantity()))
+					: new GearSetupItem(0, 0));
+			}
+			while (!invList.isEmpty() && invList.get(invList.size() - 1).getItemId() <= 0)
+			{
+				invList.remove(invList.size() - 1);
 			}
 		}
 		s.setInventory(invList);

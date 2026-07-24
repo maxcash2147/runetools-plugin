@@ -139,7 +139,7 @@ class BankFilterController
 		layoutManager.saveLayout(new Layout(tag, cells));
 	}
 
-	/** Cancel our filter — only if OUR tag is the active one (don't clobber another plugin's). */
+	/** Cancel our filter - only if OUR tag is the active one (don't clobber another plugin's). */
 	void clear()
 	{
 		clientThread.invoke(() ->

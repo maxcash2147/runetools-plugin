@@ -2,12 +2,14 @@ package com.runetools;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import java.io.IOException;
 import java.util.List;
 import okhttp3.Callback;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
+import okhttp3.Response;
 
 /**
  * Thin wrapper over the RuneTools plugin API. Every request carries the user's Bearer key
@@ -17,6 +19,9 @@ import okhttp3.RequestBody;
 class RuneToolsApiClient
 {
 	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
+
+	/** Never buffer more than this from a response - bounds a hostile/huge body (memory-exhaustion DoS). */
+	static final long MAX_RESPONSE_BYTES = 4L * 1024 * 1024;
 
 	private final OkHttpClient http;
 	private final RuneToolsConfig config;
@@ -35,17 +40,100 @@ class RuneToolsApiClient
 			return "https://gecharts.com";
 		}
 		u = u.trim().replaceAll("/+$", "");
-		// The consent disclosure promises the key travels over HTTPS. Upgrade any non-loopback
-		// http:// so a password-equivalent key can never leave over cleartext; keep loopback http
-		// so local/staging dev (http://127.0.0.1:8000) still works.
-		String lower = u.toLowerCase();
-		if (lower.startsWith("http://")
-			&& !lower.startsWith("http://localhost")
-			&& !lower.startsWith("http://127.0.0.1"))
+		// The consent disclosure promises the key travels over HTTPS - enforce it for EVERY host,
+		// localhost included. A password-equivalent key must never leave over cleartext, so any
+		// http:// is upgraded to https://. Run a local dev server over TLS (see LOCAL_TESTING.md /
+		// mkcert) and point the plugin at https://localhost:5173.
+		if (u.length() >= 7 && u.regionMatches(true, 0, "http://", 0, 7))
 		{
-			u = "https://" + u.substring("http://".length());
+			u = "https://" + u.substring(7);
 		}
 		return u;
+	}
+
+	/** The bare host of a URL (no scheme, userinfo, port, path), or "" if it can't be parsed. */
+	static String hostOf(String url)
+	{
+		if (url == null)
+		{
+			return "";
+		}
+		int scheme = url.indexOf("://");
+		String rest = scheme >= 0 ? url.substring(scheme + 3) : url;
+		int slash = rest.indexOf('/');
+		if (slash >= 0)
+		{
+			rest = rest.substring(0, slash);
+		}
+		int at = rest.lastIndexOf('@');   // strip userinfo
+		if (at >= 0)
+		{
+			rest = rest.substring(at + 1);
+		}
+		if (rest.startsWith("["))         // IPv6 literal: [::1]:port
+		{
+			int rb = rest.indexOf(']');
+			return rb >= 0 ? rest.substring(1, rb) : rest.substring(1);
+		}
+		int colon = rest.indexOf(':');    // strip port
+		if (colon >= 0)
+		{
+			rest = rest.substring(0, colon);
+		}
+		return rest;
+	}
+
+	/**
+	 * True only for genuine loopback hosts. Used to vet the (untrusted) host of a server-supplied
+	 * share URL, so the 127.0.0.0/8 test validates four numeric octets - a bare
+	 * {@code startsWith("127.")} would wrongly accept "127.evil.com" or "127.0.0.1.attacker.example".
+	 */
+	static boolean isLoopbackHost(String host)
+	{
+		if (host == null || host.isEmpty())
+		{
+			return false;
+		}
+		String h = host.toLowerCase();
+		if (h.equals("localhost") || h.equals("::1") || h.equals("0:0:0:0:0:0:0:1"))
+		{
+			return true;
+		}
+		String[] octets = h.split("\\.");
+		if (octets.length != 4)
+		{
+			return false;
+		}
+		try
+		{
+			if (Integer.parseInt(octets[0]) != 127)
+			{
+				return false;
+			}
+			for (int i = 1; i < 4; i++)
+			{
+				int o = Integer.parseInt(octets[i]);
+				if (o < 0 || o > 255)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+		catch (NumberFormatException ex)
+		{
+			return false;   // non-numeric label is not loopback
+		}
+	}
+
+	/** Read a response body without ever buffering more than {@link #MAX_RESPONSE_BYTES}. */
+	static String readBoundedBody(Response r) throws IOException
+	{
+		if (r == null || r.body() == null)
+		{
+			return "";
+		}
+		return r.peekBody(MAX_RESPONSE_BYTES).string();
 	}
 
 	private Request.Builder authed(String path)
@@ -56,7 +144,7 @@ class RuneToolsApiClient
 			.header("Accept", "application/json");
 	}
 
-	/** Validate the key / fetch "Connected as …". */
+	/** Validate the key / fetch "Connected as ...". */
 	void me(Callback callback)
 	{
 		http.newCall(authed("/api/plugin/me").get().build()).enqueue(callback);
@@ -118,6 +206,48 @@ class RuneToolsApiClient
 			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
 	}
 
+	/** Publish a bank layout to the user's gecharts.com profile; response carries {code, url}. */
+	void postBankLayout(JsonObject body, Callback callback)
+	{
+		http.newCall(authed("/api/plugin/bank-layouts")
+			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
+	}
+
+	/** Push the CA catalog + this account's completion to the site's planner. */
+	void postCombatAchievements(JsonObject body, Callback callback)
+	{
+		http.newCall(authed("/api/plugin/combat-achievements")
+			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
+	}
+
+	/** Push collection-log totals + the pages read this session (server accumulates the replica). */
+	void postCollectionLog(JsonObject body, Callback callback)
+	{
+		http.newCall(authed("/api/plugin/collection-log")
+			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
+	}
+
+	/**
+	 * Push the OSRS TCG collection for the TCG hiscores. Economy fields ride every changed send; the
+	 * {@code cards} array is preserve-if-absent (omitted = server keeps the last one).
+	 */
+	void postTcg(JsonObject body, Callback callback)
+	{
+		http.newCall(authed("/api/plugin/tcg")
+			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
+	}
+
+	/** Pull the user's bank layouts (incl. ones imported on the site). A matching {@code etag} -> 304. */
+	void getBankLayouts(String etag, Callback callback)
+	{
+		Request.Builder b = authed("/api/plugin/bank-layouts?since=0");
+		if (etag != null && !etag.isEmpty())
+		{
+			b.header("If-None-Match", etag);
+		}
+		http.newCall(b.get().build()).enqueue(callback);
+	}
+
 	void postState(AccountSnapshot s, Callback callback)
 	{
 		JsonObject body = new JsonObject();
@@ -133,8 +263,46 @@ class RuneToolsApiClient
 		body.addProperty("ts", s.snapshotTsMillis);
 		body.add("offers", s.offers);
 		body.add("inventory", s.inventory);
-		body.add("bank", s.bank);
+		// Only send the bank once it's captured; omitting it tells the server to keep the last one.
+		if (s.bank != null)
+		{
+			body.add("bank", s.bank);
+		}
+		// Same preserve-if-absent contract for skills, quests and slayer.
+		if (s.skills != null)
+		{
+			body.add("skills", s.skills);
+		}
+		if (s.quests != null)
+		{
+			body.add("quests", s.quests);
+		}
+		if (s.slayer != null)
+		{
+			body.add("slayer", s.slayer);
+		}
 		http.newCall(authed("/api/plugin/state")
 			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
+	}
+
+	// -- pull endpoints for in-game display (contracts defined in IMPLEMENTATION_PLAN.md) -------- //
+
+	/** {@code {"items":[{item_id,name,limit,used,remaining,resets_at}]}} - 4h GE buy-limit usage. */
+	void getBuyLimits(Callback callback)
+	{
+		http.newCall(authed("/api/plugin/buy-limits").get().build()).enqueue(callback);
+	}
+
+	/** {@code {"now":sec,"triggered":[{item_id,name,field,op,threshold,value,ts}]}} since {@code since}. */
+	void getTriggeredAlerts(long sinceEpochSec, Callback callback)
+	{
+		http.newCall(authed("/api/plugin/alerts/triggered?since=" + sinceEpochSec).get().build())
+			.enqueue(callback);
+	}
+
+	/** {@code {"plan":[task_id,...],"updated_at":ts}} - the user's Combat Achievements plan. */
+	void getCaPlan(Callback callback)
+	{
+		http.newCall(authed("/api/plugin/ca-plan").get().build()).enqueue(callback);
 	}
 }

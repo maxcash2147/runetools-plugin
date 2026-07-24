@@ -11,7 +11,7 @@ import net.runelite.api.GrandExchangeOfferState;
  *   <li>keep a per-slot {@link SavedOffer} baseline;</li>
  *   <li>emit a trade only for a POSITIVE (quantitySold, spent) delta, so multi-tick partial
  *       fills are each counted exactly once and never re-counted;</li>
- *   <li>a slot with no baseline yet (fresh start / first sight) is adopted silently — we can't
+ *   <li>a slot with no baseline yet (fresh start / first sight) is adopted silently - we can't
  *       count fills that happened before we were tracking;</li>
  *   <li>a changed item/price/total is treated as a fresh offer (desync guard);</li>
  *   <li>EMPTY clears the slot's baseline. The caller drops the login-time EMPTY burst.</li>
@@ -19,7 +19,7 @@ import net.runelite.api.GrandExchangeOfferState;
  *
  * <p>Baselines are held <b>in memory</b> (a fresh array per plugin start), deliberately NOT in the
  * RSProfile config: round-tripping this custom object through {@code ConfigManager} proved
- * unreliable — the read came back {@code null}, so every fill looked like a fresh baseline and no
+ * unreliable - the read came back {@code null}, so every fill looked like a fresh baseline and no
  * trade was ever emitted. The only cost of in-memory state is that baselines don't survive a client
  * restart (an offer already partly filled before startup is adopted, not back-counted), which is an
  * acceptable trade for correct, reliable capture.

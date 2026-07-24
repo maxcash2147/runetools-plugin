@@ -28,8 +28,16 @@ the server you configure, over HTTPS. Revoke it any time from the website.
 | Data | When | Why |
 |---|---|---|
 | Completed GE fills (item, buy/sell, qty, unit price, time) | as they fill | automatic P/L tracking |
-| RSN + account hash | on sync | link the character to your site account |
-| Coins, open GE offers, inventory, current world + members status | while playing | bankroll- and slot-aware flip suggestions |
+| RSN + account hash + a capture timestamp | on sync | link the character to your site account |
+| Coins, free GE slots, open GE offers, inventory, current world + members status | while playing | bankroll- and slot-aware flip suggestions |
+| Skill levels & experience | while playing | level-aware BIS / DPS / skill tools |
+| Quest progress | once per login | quest-gated gear/BIS filtering |
+| Combat Achievements (tasks + completion) | when they change | the site's CA planner |
+| Current Slayer task (creature, amount, assigning master, points, streak, task location) | when it changes | the site's Slayer optimizer |
+| Collection Log progress + the items on pages you open | when you open the log | a browsable collection-log replica |
+| OSRS TCG collection (card names + counts, foils), credits, packs opened, stats | when they change, if you run the [OSRS TCG](https://github.com/Azderi/osrs-tcg) plugin | the site's TCG hiscores + collection page |
+| A gear setup's worn gear, inventory, rune pouch, quiver & spellbook | when you save or update that setup | two-way gear-setup sync |
+| A bank tab's item layout | only when you export a tab to share it | publish a shareable bank layout to your profile |
 | Bank contents | only if you enable **Include bank**, and only when you open the bank | holdings P/L, best-loadout-from-bank |
 
 Nothing is sent until you paste a key **and** accept the consent toggle. See the in-client warning
@@ -48,9 +56,8 @@ Requires a JDK 11+ and the RuneLite Gradle setup (this repo is generated from
 ./gradlew shadowJar        # -> build/libs/runetools-1.0.0-all.jar
 ```
 
-> This machine had no JDK/Gradle when the code was written, so the Java has **not** been compiled
-> here yet — run `./gradlew build` once to confirm on a machine with a JDK. `runeLiteVersion` is
-> pinned to `latest.release`; if an API name has drifted, bump it or adjust the import.
+> `runeLiteVersion` is pinned to `latest.release`, so the build tracks the current RuneLite API; if
+> an API name ever drifts, bump it or adjust the import. Build with a JDK 11 (`./gradlew build`).
 
 To point at a local/staging server during development, change **Server URL** in the plugin settings
 (default `https://gecharts.com`) and run the site with `ge-trader serve`.
@@ -74,8 +81,14 @@ We follow the same pattern as RuneLite's built-in Grand Exchange plugin and Flip
 The website endpoints this plugin talks to live in the `ge-trader` repo:
 
 - `POST /api/plugin/trades` — ingest GE fills (JSON; reuses the trade table + dedup)
-- `POST /api/plugin/state` — latest-wins snapshot of gp / offers / holdings
+- `POST /api/plugin/state` — latest-wins snapshot of gp / offers / holdings / skills / quests / slayer
 - `GET  /api/plugin/me` — validate the key, return linked RSNs
+- `GET/POST … /api/plugin/setups` — two-way gear-setup sync
+- `POST /api/plugin/combat-achievements` · `GET /api/plugin/ca-plan` — CA catalogue + completion + plan
+- `POST /api/plugin/collection-log` — collection-log totals + opened pages
+- `POST /api/plugin/tcg` — OSRS TCG collection for the hiscores (economy every change; `cards` preserve-if-absent)
+- `GET/POST /api/plugin/bank-layouts` — pull imported layouts / publish a shared bank tab
+- `GET  /api/plugin/buy-limits` · `GET /api/plugin/alerts/triggered` — 4h buy-limit usage + triggered price alerts (in-game display)
 - `POST /api/auth/keys` · `GET /api/auth/keys` · `DELETE /api/auth/keys/{id}` — mint / list / revoke keys (session-authed, on the site)
 
 All plugin endpoints authenticate with `Authorization: Bearer rtk_…`.
