@@ -71,6 +71,8 @@ public class TcgTest
 		Assert.assertEquals("Abyssal whip", c.get("name").getAsString());
 		Assert.assertEquals(2L, c.get("qty").getAsLong());
 		Assert.assertEquals(1L, c.get("foil").getAsLong());
+		// First-obtained = earliest pulledAt across variants (1710000000000ms), as epoch seconds.
+		Assert.assertEquals(1_710_000_000L, c.get("at").getAsLong());
 	}
 
 	@Test

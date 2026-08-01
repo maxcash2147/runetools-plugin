@@ -177,7 +177,7 @@ class SetupManager
 					}
 					persist(arr);
 					onChange.run();
-					log.info("RuneTools: {} gear setup(s) synced", parsed.size());
+					log.debug("RuneTools: {} gear setup(s) synced", parsed.size());
 				}
 				catch (Exception ex)
 				{

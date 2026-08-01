@@ -27,8 +27,10 @@ public interface RuneToolsConfig extends Config
 	@ConfigItem(
 		keyName = "apiKey",
 		name = "API key",
-		description = "Paste the key you generated on gecharts.com (Account -> Connect RuneLite). Treat it like a password.",
+		description = "Legacy manual key. You no longer need this - just log in and click \"Open RuneTools\" "
+			+ "in the panel; each character links itself automatically. Kept only for advanced/manual setups.",
 		secret = true,
+		hidden = true,
 		section = connectionSection,
 		position = 0
 	)
@@ -46,7 +48,7 @@ public interface RuneToolsConfig extends Config
 	)
 	default String serverUrl()
 	{
-		return "https://gecharts.com";
+		return "https://runetools.com";
 	}
 
 	@ConfigItem(
@@ -66,10 +68,14 @@ public interface RuneToolsConfig extends Config
 			+ "progress and the items on the pages you view; if you also run the OSRS TCG plugin it sends "
 			+ "your TCG card collection (the card names and how many of each you own, foils included), your "
 			+ "credits, packs opened and collection stats; when you export a bank tab to share it, it "
-			+ "sends that tab's item layout to your gecharts.com profile; and only if you enable "
+			+ "sends that tab's item layout to your runetools.com profile; only if you enable "
 			+ "\"Include bank\" it "
-			+ "sends your bank contents. This server is NOT controlled or verified by the RuneLite "
-			+ "developers. Your API "
+			+ "sends your bank contents; and only if you run the Another Bronzeman Mode plugin with "
+			+ "\"Include Bronzeman unlocks\" on, it sends the list of item ids you have unlocked there. "
+			// The Plugin Hub requires this sentence, near enough verbatim, on any config item that
+			// turns on a third-party-server feature. Without it the plugin fails review.
+			+ "This feature submits your IP address to a 3rd-party server not controlled or verified "
+			+ "by RuneLite developers. Your API "
 			+ "key is stored locally and sent only to that server over HTTPS. Enable only if you accept "
 			+ "this.",
 		section = connectionSection,
@@ -136,13 +142,13 @@ public interface RuneToolsConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "inGameAlerts",
-		name = "In-game price alerts",
-		description = "Show a RuneLite notification in-game when one of your RuneTools price alerts triggers. Receives data only - nothing extra is sent.",
+		keyName = "syncBronzeman",
+		name = "Include Bronzeman unlocks",
+		description = "Also count items you've unlocked in the Another Bronzeman Mode plugin when RuneTools computes best-in-slot from your owned gear.",
 		section = syncSection,
-		position = 5
+		position = 3
 	)
-	default boolean inGameAlerts()
+	default boolean syncBronzeman()
 	{
 		return true;
 	}
@@ -163,7 +169,8 @@ public interface RuneToolsConfig extends Config
 		keyName = "syncCollectionLog",
 		name = "Sync Collection Log",
 		description = "Sync your Collection Log to RuneTools for a browsable replica on the site. Overall "
-			+ "progress syncs immediately; a page's items sync when you open that page in-game.",
+			+ "progress syncs immediately; opening the log reads the whole thing in one request, and the "
+			+ "pages you look at add their names and exact quantities.",
 		section = setupsSection,
 		position = 2
 	)

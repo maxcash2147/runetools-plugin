@@ -9,10 +9,10 @@ Two repos are involved:
 | Repo | Path | Role |
 |---|---|---|
 | `runetools_plugin` | `C:\Users\you\Git_Projects\runetools_plugin` | the RuneLite plugin (Java/Gradle) |
-| `ge-trader` | `C:\Users\you\Git_Projects\ge-trader` | the site + API (`gecharts.com`) |
+| `ge-trader` | `C:\Users\you\Git_Projects\ge-trader` | the site + API (`runetools.com`) |
 
 > **The site is now two processes.** The frontend was rewritten in **SvelteKit**
-> (`ge-trader/web-sveltekit/`) and that's what `gecharts.com` serves. The Python
+> (`ge-trader/web-sveltekit/`) and that's what `runetools.com` serves. The Python
 > **FastAPI backend** still owns everything under `/api` and `/static` (the DPS engine,
 > prices, auth, plugin sync). So local testing runs **both**: the FastAPI backend *and*
 > the SvelteKit frontend. `ge-trader serve` only starts the backend — its own web page is

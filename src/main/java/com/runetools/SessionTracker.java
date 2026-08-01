@@ -51,6 +51,10 @@ class SessionTracker
 					lots.removeFirst();
 				}
 			}
+			if (lots != null && lots.isEmpty())
+			{
+				buyLots.remove(t.getItemId());   // drop the itemId once its lots are fully matched, so the map can't grow unbounded
+			}
 			// any sell qty with no matching buy this session is ignored (cost basis unknown)
 		}
 		recent.addFirst(t);

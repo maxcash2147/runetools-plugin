@@ -166,7 +166,7 @@ class BankOrganizer
 		writeFiled(filed);
 
 		bankTags.openBankTag(ALL_TAG, BankTagsService.OPTION_ALLOW_MODIFICATIONS);
-		log.info("RuneTools: organised bank into {} tab(s)", owned.size());
+		log.debug("RuneTools: organised bank into {} tab(s)", owned.size());
 		return "Organized into " + owned.size() + " tabs. Open your bank to see it.";
 	}
 
@@ -257,7 +257,7 @@ class BankOrganizer
 			configManager.setConfiguration(GROUP, KEY_OWNED, String.join(",", owned));
 		}
 		tabManager.save();
-		log.info("RuneTools: filed {} new item(s)", fresh.size());
+		log.debug("RuneTools: filed {} new item(s)", fresh.size());
 		return "Filed " + fresh.size() + " new item" + (fresh.size() == 1 ? "" : "s") + " into their tabs.";
 	}
 
@@ -401,7 +401,7 @@ class BankOrganizer
 			{
 				bankTags.closeBankTag();
 			}
-			log.info("RuneTools: removed organised bank tabs");
+			log.debug("RuneTools: removed organised bank tabs");
 			if (onDone != null)
 			{
 				onDone.run();
@@ -446,7 +446,7 @@ class BankOrganizer
 			ensureTab(tag, mostValuable(canon));
 			tabManager.save();
 			bankTags.openBankTag(tag, BankTagsService.OPTION_ALLOW_MODIFICATIONS);
-			log.info("RuneTools: saved bank tab as tag \"{}\" ({} items)", tag, canon.size());
+			log.debug("RuneTools: saved bank tab as tag \"{}\" ({} items)", tag, canon.size());
 			if (onStatus != null)
 			{
 				onStatus.accept("Saved as tag \"" + tag + "\". In the bank, right-click its tab "
@@ -498,7 +498,7 @@ class BankOrganizer
 			int safeIcon = (icon > 0 && plausibleItemId(icon)) ? icon : first;
 			ensureTab(tag, safeIcon);
 			tabManager.save();
-			log.info("RuneTools: applied imported layout \"{}\"", tag);
+			log.debug("RuneTools: applied imported layout \"{}\"", tag);
 		});
 	}
 

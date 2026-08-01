@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import java.io.IOException;
 import java.util.List;
+import java.util.function.Supplier;
 import okhttp3.Callback;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -25,11 +26,28 @@ class RuneToolsApiClient
 
 	private final OkHttpClient http;
 	private final RuneToolsConfig config;
+	// Resolves the API key for the CURRENTLY logged-in character (per-account keys). Defaults to the
+	// legacy single config key; the plugin swaps in its per-account-hash resolver at startup.
+	private Supplier<String> keySupplier;
 
 	RuneToolsApiClient(OkHttpClient http, RuneToolsConfig config)
 	{
 		this.http = http;
 		this.config = config;
+		this.keySupplier = config::apiKey;
+	}
+
+	/** Point the client at the plugin's per-character key resolver. */
+	void setKeySupplier(Supplier<String> keySupplier)
+	{
+		this.keySupplier = keySupplier;
+	}
+
+	/** The active character's key, or "" (an empty key reads as "no key" server-side). */
+	String activeKey()
+	{
+		String k = keySupplier != null ? keySupplier.get() : null;
+		return k != null ? k : "";
 	}
 
 	String base()
@@ -37,7 +55,7 @@ class RuneToolsApiClient
 		String u = config.serverUrl();
 		if (u == null || u.trim().isEmpty())
 		{
-			return "https://gecharts.com";
+			return "https://runetools.com";
 		}
 		u = u.trim().replaceAll("/+$", "");
 		// The consent disclosure promises the key travels over HTTPS - enforce it for EVERY host,
@@ -140,7 +158,7 @@ class RuneToolsApiClient
 	{
 		return new Request.Builder()
 			.url(base() + path)
-			.header("Authorization", "Bearer " + config.apiKey())
+			.header("Authorization", "Bearer " + activeKey())
 			.header("Accept", "application/json");
 	}
 
@@ -148,6 +166,24 @@ class RuneToolsApiClient
 	void me(Callback callback)
 	{
 		http.newCall(authed("/api/plugin/me").get().build()).enqueue(callback);
+	}
+
+	/**
+	 * Mint a one-time browser-login code so the user can open the site already signed in - creating a
+	 * site account on first sight (keyed by the game account hash) when they have no key yet. The
+	 * request carries the Bearer key if one is stored; an empty key reads as "no key" server-side.
+	 * Response: {@code {code, url, api_key?}}.
+	 */
+	void webLogin(String accountHash, String rsn, Callback callback)
+	{
+		JsonObject body = new JsonObject();
+		if (accountHash != null)
+		{
+			body.addProperty("account_hash", accountHash);
+		}
+		body.addProperty("rsn", rsn);
+		http.newCall(authed("/api/plugin/web-login")
+			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
 	}
 
 	/** Pull the user's gear setups (full list). A matching {@code etag} yields a cheap 304. */
@@ -206,7 +242,7 @@ class RuneToolsApiClient
 			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
 	}
 
-	/** Publish a bank layout to the user's gecharts.com profile; response carries {code, url}. */
+	/** Publish a bank layout to the user's runetools.com profile; response carries {code, url}. */
 	void postBankLayout(JsonObject body, Callback callback)
 	{
 		http.newCall(authed("/api/plugin/bank-layouts")
@@ -281,28 +317,14 @@ class RuneToolsApiClient
 		{
 			body.add("slayer", s.slayer);
 		}
+		// Bronzeman unlock ids: preserve-if-absent, same as bank. Only present when the toggle + consent
+		// are on and the Another Bronzeman Mode plugin's unlocks file exists for this profile.
+		if (s.bronzeman != null)
+		{
+			body.add("bronzeman", s.bronzeman);
+		}
 		http.newCall(authed("/api/plugin/state")
 			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
 	}
 
-	// -- pull endpoints for in-game display (contracts defined in IMPLEMENTATION_PLAN.md) -------- //
-
-	/** {@code {"items":[{item_id,name,limit,used,remaining,resets_at}]}} - 4h GE buy-limit usage. */
-	void getBuyLimits(Callback callback)
-	{
-		http.newCall(authed("/api/plugin/buy-limits").get().build()).enqueue(callback);
-	}
-
-	/** {@code {"now":sec,"triggered":[{item_id,name,field,op,threshold,value,ts}]}} since {@code since}. */
-	void getTriggeredAlerts(long sinceEpochSec, Callback callback)
-	{
-		http.newCall(authed("/api/plugin/alerts/triggered?since=" + sinceEpochSec).get().build())
-			.enqueue(callback);
-	}
-
-	/** {@code {"plan":[task_id,...],"updated_at":ts}} - the user's Combat Achievements plan. */
-	void getCaPlan(Callback callback)
-	{
-		http.newCall(authed("/api/plugin/ca-plan").get().build()).enqueue(callback);
-	}
 }

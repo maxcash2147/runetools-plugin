@@ -101,7 +101,7 @@ class BankFilterController
 				opts |= BankTagsService.OPTION_NO_LAYOUT;
 			}
 			bankTags.openBankTag(tag, opts);
-			log.info("RuneTools: bank filter -> \"{}\" ({} items, layout={})", setup.getName(), n, useLayout);
+			log.debug("RuneTools: bank filter -> \"{}\" ({} items, layout={})", setup.getName(), n, useLayout);
 		});
 	}
 

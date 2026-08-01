@@ -144,7 +144,7 @@ final class Tcg
 	{
 		// Aggregate owned copies per card name (foil folded in), excluding debug-provenance cards so the
 		// hiscores only counts legitimately-pulled cards - mirrors the plugin's own web-share filtering.
-		Map<String, long[]> byName = new LinkedHashMap<>();   // name -> [total, foil]
+		Map<String, long[]> byName = new LinkedHashMap<>();   // name -> [total, foil, first-obtained ms]
 		aggregateCardEntries(root.getAsJsonArray("cardEntries"), byName);
 		if (byName.isEmpty())
 		{
@@ -177,6 +177,11 @@ final class Tcg
 			if (foil > 0)
 			{
 				c.addProperty("foil", foil);
+			}
+			long atMs = e.getValue()[2];
+			if (atMs > 0)
+			{
+				c.addProperty("at", atMs / 1000L);   // first-obtained, epoch seconds (for "unlocked when")
 			}
 			cards.add(c);
 			totalOwned += total;
@@ -249,7 +254,7 @@ final class Tcg
 					continue;
 				}
 				boolean foil = getBool(v, "foil");
-				add(byName, name, qty, foil ? qty : 0);
+				add(byName, name, qty, foil ? qty : 0, Math.max(0, getLong(v, "pulledAt", 0)));
 			}
 		}
 	}
@@ -274,15 +279,20 @@ final class Tcg
 				continue;
 			}
 			boolean foil = getBool(row, "foil");
-			add(byName, name.trim(), 1, foil ? 1 : 0);
+			add(byName, name.trim(), 1, foil ? 1 : 0, Math.max(0, getLong(row, "pulledAt", 0)));
 		}
 	}
 
-	private static void add(Map<String, long[]> byName, String name, long total, long foil)
+	private static void add(Map<String, long[]> byName, String name, long total, long foil, long atMs)
 	{
-		long[] cur = byName.computeIfAbsent(name, n -> new long[2]);
+		long[] cur = byName.computeIfAbsent(name, n -> new long[3]);
 		cur[0] += total;
 		cur[1] += foil;
+		// First-obtained = earliest known pull time; 0 = unknown. Keep the smallest positive.
+		if (atMs > 0 && (cur[2] == 0 || atMs < cur[2]))
+		{
+			cur[2] = atMs;
+		}
 	}
 
 	private static boolean isDebugPull(String pulledBy)

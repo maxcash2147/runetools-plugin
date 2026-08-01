@@ -2,7 +2,10 @@ package com.runetools;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import java.util.ArrayList;
+import java.util.List;
 import net.runelite.api.Client;
+import net.runelite.api.MenuAction;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.game.ItemManager;
 
@@ -24,6 +27,16 @@ final class CollectionLog
 	static final int GROUP = 621;            // InterfaceID.COLLECTION
 	static final int DRAW_SCRIPT = 2731;     // ScriptID.COLLECTION_DRAW_LIST - fires when a page is drawn
 	private static final int ITEMS_CONTENTS = 37;   // InterfaceID.Collection.ITEMS_CONTENTS (child of group 621)
+
+	// Whole-log transmit. SETUP_SCRIPT fires when the interface is built; asking for a search makes
+	// the server send every entry, one TRANSMIT_SCRIPT pre-fire each; INIT_SCRIPT restores the view.
+	static final int SETUP_SCRIPT = 7797;      // collection log interface setup
+	static final int TRANSMIT_SCRIPT = 4100;   // one obtained entry: args {?, itemId, quantity}
+	private static final int INIT_SCRIPT = 2240;
+	// InterfaceID.Collection.SEARCH_TOGGLE (packed group<<16|child = 621<<16|76).
+	private static final int SEARCH_TOGGLE = (GROUP << 16) | 76;
+	// VarbitID.COLLECTION_POH_HOST_BOOK_OPEN - 1 while viewing someone else's log via their POH.
+	static final int VB_POH_HOST_BOOK_OPEN = 12061;
 
 	// Per-tab page-list containers (InterfaceID.Collection.*_CONTAINER), indexed by tab 0..4.
 	private static final int[] TAB_CONTAINER = {10, 14, 24, 26, 29};   // boss, raid, clue, minigame, other
@@ -177,6 +190,40 @@ final class CollectionLog
 			}
 		}
 		return null;
+	}
+
+	// -- whole-log capture: ask the SERVER for everything, once ----------------------------- //
+
+	/** True while the collection-log interface is open and drawn (its item panel has content). */
+	static boolean isOpen(Client client)
+	{
+		Widget c = client.getWidget(GROUP, ITEMS_CONTENTS);
+		return c != null && c.getDynamicChildren() != null;
+	}
+
+	/**
+	 * True when the open collection log belongs to SOMEONE ELSE - you are viewing it through a POH
+	 * Adventure Log. Their items must never be read: they would be uploaded under your account and
+	 * shown as yours, and collecting data about other players is a listed Plugin Hub rejection
+	 * reason. Every capture path checks this.
+	 */
+	static boolean isOtherPlayers(Client client)
+	{
+		return client.getVarbitValue(VB_POH_HOST_BOOK_OPEN) == 1;
+	}
+
+	/**
+	 * Ask the server to transmit the whole collection log. The "Search" op on the interface's search
+	 * toggle is what makes the server send every entry (each arrives as its own
+	 * {@link #TRANSMIT_SCRIPT} pre-fire); re-running the setup script then puts the interface back
+	 * how the player left it, so nothing is clicked and nothing visibly changes.
+	 *
+	 * <p>This is the approach used by the approved WikiSync and RuneProfile plugins. Client thread only.
+	 */
+	static void requestFullLog(Client client)
+	{
+		client.menuAction(-1, SEARCH_TOGGLE, MenuAction.CC_OP, 1, -1, "Search", null);
+		client.runScript(INIT_SCRIPT);
 	}
 
 	/** A single collection-log page read from the interface, with a change hash for dedup. */

@@ -1,6 +1,6 @@
 # Bank-scan BIS API — plugin wiring contract
 
-Server side is **live** (`POST /api/plugin/bis`, ge-trader commit `a5c299f`, deployed on gecharts.com).
+Server side is **live** (`POST /api/plugin/bis`, ge-trader commit `a5c299f`, deployed on runetools.com).
 Computes "the highest-DPS setup this player OWNS for a given monster" in ~20–30ms.
 
 ## Auth
@@ -9,7 +9,7 @@ minted on the site). 401 without it. Rate limit: 240 req/min per IP (shared plug
 
 ## Request
 
-`POST https://gecharts.com/api/plugin/bis`
+`POST https://runetools.com/api/plugin/bis`
 
 ```json
 {
