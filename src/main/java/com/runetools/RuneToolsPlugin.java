@@ -1216,11 +1216,7 @@ public class RuneToolsPlugin extends Plugin
 			return;
 		}
 		JsonObject body = new JsonObject();
-		String rsn = snapshot.get().rsn;
-		if (rsn != null)
-		{
-			body.addProperty("rsn", rsn);
-		}
+		stampIdentity(body);
 		if (totals != null)
 		{
 			body.add("totals", totals);
@@ -1368,7 +1364,7 @@ public class RuneToolsPlugin extends Plugin
 		}
 		final boolean sendCards = d.cardsHash != tcgCardsHash;
 		JsonObject body = d.economy;   // a fresh object from read() - safe to extend
-		body.addProperty("rsn", snapshot.get().rsn);
+		stampIdentity(body);
 		if (sendCards)
 		{
 			body.add("cards", d.cards);
@@ -1433,11 +1429,7 @@ public class RuneToolsPlugin extends Plugin
 				return;   // nothing changed since the last successful post
 			}
 			JsonObject body = new JsonObject();
-			String rsn = snapshot.get().rsn;
-			if (rsn != null)
-			{
-				body.addProperty("rsn", rsn);
-			}
+			stampIdentity(body);
 			if (sendCatalog)
 			{
 				body.add("tasks", snap.tasks);
@@ -2125,6 +2117,24 @@ public class RuneToolsPlugin extends Plugin
 	private String activeApiKey()
 	{
 		return keyForHash(snapshot.get().accountHash);
+	}
+
+	/**
+	 * Stamp the logged-in character's identity (rsn + account_hash) onto a sync body. The site
+	 * publishes TCG, the collection log and combat achievements under the RSN, so it will only accept
+	 * a name this character has linked - the account hash is what proves the link on a first sync.
+	 */
+	private void stampIdentity(JsonObject body)
+	{
+		AccountSnapshot s = snapshot.get();
+		if (s.rsn != null)
+		{
+			body.addProperty("rsn", s.rsn);
+		}
+		if (s.accountHash != null)
+		{
+			body.addProperty("account_hash", s.accountHash);
+		}
 	}
 
 	private String keyForHash(String hash)
