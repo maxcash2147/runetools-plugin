@@ -1,14 +1,29 @@
-# RuneTools RuneLite plugin
+# RuneTools
 
-Sync your Old School RuneScape account to **[RuneTools / GE Charts](https://runetools.com)** so the
-site can:
+The companion plugin for **[RuneTools](https://runetools.com)**, a set of Old School RuneScape
+calculators and Grand Exchange tools. It syncs your account to the site so the tools work from
+your real data instead of numbers you type in.
 
-- **auto-track your Grand Exchange profit/loss** - every buy and sell you make is uploaded and
-  turned into a live P/L breakdown (no more CSV exports), and
-- **personalize flip suggestions** to your *real* bankroll, free GE slots and remaining 4-hour buy
-  limits instead of generic assumptions.
+## Features
 
-This is the first slice of a broader companion plugin - see [`ROADMAP.md`](ROADMAP.md).
+- **Grand Exchange profit tracking.** Every buy and sell you complete is uploaded and turned into a
+  live profit/loss breakdown on the site, with this session's P/L, recent flips and open offers in
+  the side panel.
+- **Flip suggestions that fit you.** The site sizes suggestions to your real coins, free GE slots,
+  open offers and the 4-hour buy limits you have left.
+- **Gear setups, both ways.** Save what you are wearing and carrying as a setup from the side
+  panel, or build setups on the site; either way they show up in both places. Pick a setup to
+  filter (and optionally arrange) your bank to exactly its items, see what you are missing and what
+  it costs, and copy setups to and from the Inventory Setups plugin.
+- **Bank Organizer.** Sort your bank into category tabs with one click (as Bank Tags tabs; no items
+  are moved), turn a native bank tab into a tag, and share a tab's layout on your RuneTools profile.
+- **Combat Achievements and Collection Log.** Tier progress and points in the panel, with the
+  planner and a browsable copy of your log on the site.
+- **RuneTools DPS.** A button in the Equipment Stats screen (and the side panel) opens the DPS
+  calculator with the gear you have on.
+
+The plugin sends nothing until you tick the consent setting and connect a character. The full list
+of what it sends, and why, is under [What it sends](#what-it-sends).
 
 ## How it connects
 
@@ -68,8 +83,10 @@ carries the same list.
 ## Network use
 
 The plugin talks only to the RuneTools server (`https://runetools.com`, or the **Server URL** you
-set), only over HTTPS, and only while a connected, consenting character is logged in. Nothing is
-sent from the login screen.
+set), only over HTTPS, and only while you are logged into the game with consent on. The background
+sync below also needs the character to be connected; everything else is a direct result of
+something you clicked (Connect, saving a setup, exporting a bank tab). Nothing is sent from the
+login screen.
 
 - **Uploads** (trades, account state, Combat Achievements, Collection Log) go out only when
   something actually changed, checked every 20 seconds. A completed GE buy is sent straight away.
@@ -113,7 +130,7 @@ Requires a JDK 11+ and the RuneLite Gradle setup (this repo is generated from
 > an API name ever drifts, bump it or adjust the import. Build with a JDK 11 (`./gradlew build`).
 
 To point at a local/staging server during development, change **Server URL** in the plugin settings
-(default `https://runetools.com`) and run the site with `ge-trader serve`.
+(default `https://runetools.com`).
 
 ## How GE capture works (and why it doesn't double-count)
 
@@ -129,22 +146,21 @@ We follow the same pattern as RuneLite's built-in Grand Exchange plugin and Flip
 - every trade carries an `ext_id` and the server dedupes on `(item, side, qty, price, ts)`, so a
   retry or a re-send is idempotent.
 
-## Server side
+## API endpoints
 
-The website endpoints this plugin talks to live in the `ge-trader` repo:
+These are every request the plugin makes, all to the configured server:
 
-- `POST /api/plugin/trades` - ingest GE fills (JSON; reuses the trade table + dedup)
-- `POST /api/plugin/state` - latest-wins snapshot of gp / offers / inventory / bank / skills
 - `POST /api/plugin/web-login` - mint the one-time browser-login code behind **Connect to
   RuneTools**, creating this character's account + key on first sight
-- `GET  /api/plugin/me` - validate a key, return linked RSNs (the connect flow uses web-login)
-- `GET/POST … /api/plugin/setups` - two-way gear-setup sync
+- `POST /api/plugin/trades` - completed GE fills (the server dedupes on `ext_id`)
+- `POST /api/plugin/state` - latest-wins snapshot of gp / offers / inventory / bank / skills
+- `GET /api/plugin/setups` (ETag) · `POST` · `PUT /{id}` · `DELETE /{id}` - two-way gear-setup sync
 - `POST /api/plugin/combat-achievements` - CA catalogue + completion
 - `POST /api/plugin/collection-log` - totals, the whole obtained set, and any pages you opened
-- `GET/POST /api/plugin/bank-layouts` - pull imported layouts / publish a shared bank tab
-- `POST /api/auth/keys` · `GET /api/auth/keys` · `DELETE /api/auth/keys/{id}` - mint / list / revoke keys (session-authed, on the site)
+- `GET /api/plugin/bank-layouts` (ETag) · `POST` - pull imported layouts / publish a shared bank tab
 
-All plugin endpoints authenticate with `Authorization: Bearer rtk_…`.
+All of them authenticate with `Authorization: Bearer rtk_…`. Keys can be listed and revoked on the
+site (`/api/auth/keys`, signed in with your RuneTools account).
 
 ## License
 

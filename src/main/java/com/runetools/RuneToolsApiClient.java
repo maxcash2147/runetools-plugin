@@ -162,12 +162,6 @@ class RuneToolsApiClient
 			.header("Accept", "application/json");
 	}
 
-	/** Validate the key / fetch "Connected as ...". */
-	void me(Callback callback)
-	{
-		http.newCall(authed("/api/plugin/me").get().build()).enqueue(callback);
-	}
-
 	/**
 	 * Mint a one-time browser-login code so the user can open the site already signed in - creating a
 	 * site account on first sight (keyed by the game account hash) when they have no key yet. The

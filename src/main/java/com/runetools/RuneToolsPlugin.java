@@ -95,8 +95,9 @@ import okhttp3.Response;
 @PluginDependency(BankTagsPlugin.class)
 @PluginDescriptor(
 	name = "RuneTools",
-	description = "Sync GE trades + account to RuneTools (runetools.com) for auto P/L and personalized flips",
-	tags = {"grand", "exchange", "ge", "flip", "flipping", "merch", "money", "profit", "runetools", "osrs"}
+	description = "Sync GE trades, account, gear setups, Combat Achievements and Collection Log to RuneTools (runetools.com)",
+	tags = {"grand", "exchange", "ge", "flip", "flipping", "merch", "money", "profit", "runetools", "osrs",
+		"collection", "log", "combat", "achievements", "bank", "gear", "setups", "dps"}
 )
 public class RuneToolsPlugin extends Plugin
 {
