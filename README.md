@@ -32,6 +32,14 @@ a new one.
 If the server ever rejects a stored key the status line says so and the button reverts to **Connect
 to RuneTools** - clicking it re-links the character and mints a working key.
 
+The Collection Log and Combat Achievements are published under the character's in-game name, so the
+site refuses them (HTTP 409, `code: "rsn_taken"`) when that name is already linked to a different
+RuneTools account. The key still works, so other syncs carry on; the plugin just stops re-sending the
+refused data, says so in the status line, and tries again once a different character logs in, the
+name changes, or the character is reconnected with a new key (or the client restarts). Likewise a
+payload the server rejects outright (400 or 413) is not re-sent until it changes, and a 429's
+`Retry-After` is honoured before the next sweep.
+
 Keys live in RuneLite's own config like any other plugin setting, one per character
 (`runetools.key_<account hash>`), and are sent only to the server you configure, always over HTTPS:
 an `http://` **Server URL** is upgraded before any request goes out. The **API key** setting is

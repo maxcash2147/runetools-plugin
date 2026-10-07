@@ -114,7 +114,16 @@ public class RuneToolsPlugin extends Plugin
 	private static final long SYNC_PERIOD_MS = 20_000L;                  // must match the @Schedule below
 	private static final long SYNC_BACKOFF_MAX_MS = 10L * 60L * 1000L;   // ten minutes between sweeps, at worst
 	private static final int SYNC_AUTH_FAILURES_MAX = 3;                 // consecutive rejected sweeps before we stop
+	private static final long RETRY_AFTER_MAX_MS = 60L * 60L * 1000L;    // a 429's Retry-After is honoured up to an hour
 	private static final String SYNC_REVOKED_MSG = "Key rejected - click \"Connect to RuneTools\" to reconnect.";
+	private static final String SYNC_NAME_TAKEN_MSG = "This character's name is linked to another RuneTools account.";
+
+	// Background endpoints, as SyncParking knows them. Trades are parked per RSN group ("trades:<rsn>").
+	private static final String EP_TRADES = "trades:";
+	private static final String EP_STATE = "state";
+	private static final String EP_COMBAT_ACHIEVEMENTS = "combat-achievements";
+	private static final String EP_COLLECTION_LOG = "collection-log";
+	private static final String EP_BANK_LAYOUTS = "bank-layouts";
 
 	// The unsynced-trade queue is re-serialised into RuneLite's config on EVERY fill, so it can't be
 	// unbounded: a client left offline (or with a dead key) for weeks would otherwise grow a multi-MB
@@ -168,6 +177,13 @@ public class RuneToolsPlugin extends Plugin
 	private final AtomicInteger authFailures = new AtomicInteger();
 	private final AtomicLong syncSweep = new AtomicLong();          // one increment per sync() pass
 	private final AtomicLong penalizedSweep = new AtomicLong(-1);   // last sweep already charged a failure
+	// A 429's Retry-After, as a "not before" time. Separate from nextSyncAtMillis because any 2xx
+	// resets that one, and the server's rate limit is per IP, so another endpoint answering fine (or a
+	// character switch) doesn't mean the wait is over.
+	private final AtomicLong retryAfterUntilMillis = new AtomicLong();
+	// Refusals that retrying can't fix (a name linked to another account, a payload the server can
+	// never accept), held per endpoint so they aren't re-posted every sweep. See SyncParking.
+	private final SyncParking parking = new SyncParking();
 
 	private int inventoryCoins;
 	private int bankCoins;
@@ -583,7 +599,14 @@ public class RuneToolsPlugin extends Plugin
 		clogAllPending = true;
 		if (panel != null)
 		{
-			panel.setStatus("Collection Log read (" + obtained.size() + " items) - syncing…", true);
+			if (parking.isNameParked(EP_COLLECTION_LOG, syncIdentity()))
+			{
+				panel.setStatus(SYNC_NAME_TAKEN_MSG, false);   // read, but it won't be sent as this character
+			}
+			else
+			{
+				panel.setStatus("Collection Log read (" + obtained.size() + " items) - syncing…", true);
+			}
 		}
 	}
 
@@ -1014,17 +1037,22 @@ public class RuneToolsPlugin extends Plugin
 
 	/**
 	 * Gate for the BACKGROUND loop: there has to be something to sync (a character in game, a key for
-	 * that character, consent) and the key must not already have been rejected. Without the in-game
-	 * check a client parked on the login screen posted every 20s forever - ~21,600 requests a day that
-	 * can only ever be no-ops. User-initiated actions keep using {@link #hasKeyAndConsent()}: an
-	 * explicit click should always be attempted, however the background loop is feeling.
+	 * that character, consent), the key must not already have been rejected, and the server must not
+	 * have asked us to wait (a 429's Retry-After). Without the in-game check a client parked on the
+	 * login screen posted every 20s forever - ~21,600 requests a day that can only ever be no-ops.
+	 * User-initiated actions keep using {@link #hasKeyAndConsent()}: an explicit click should always be
+	 * attempted, however the background loop is feeling.
 	 */
 	private boolean syncAllowed()
 	{
-		return loggedIn && !authRevoked && hasKeyAndConsent();
+		return loggedIn && !authRevoked && System.currentTimeMillis() >= retryAfterUntilMillis.get()
+			&& hasKeyAndConsent();
 	}
 
-	/** Back to the normal period: no penalty, no rejected-key halt. */
+	/**
+	 * Back to the normal period: no penalty, no rejected-key halt. A 429's Retry-After is left alone:
+	 * the rate limit is per IP, so it outlasts a character switch or a new key.
+	 */
 	private void resumeSync()
 	{
 		syncFailures.set(0);
@@ -1036,29 +1064,88 @@ public class RuneToolsPlugin extends Plugin
 	/** A transport-level failure (no response at all) is charged the same as a 5xx. */
 	private void noteSyncFailure()
 	{
-		noteSyncResult(0);
+		chargeSyncFailure(0, false);
 	}
 
 	/**
 	 * Every background response funnels through here so the whole loop shares ONE health signal:
 	 * a failure slows every endpoint down instead of each carrying on hammering independently, and any
-	 * 2xx puts it straight back to the normal period. {@code code} is 0 for a transport failure.
+	 * 2xx puts it straight back to the normal period. See {@link SyncResponse} for how each status is
+	 * read.
 	 *
-	 * <p>404 is neutral: several endpoints legitimately 404 until the server ships them, and counting
-	 * that as an outage would pin a perfectly healthy client at the ten-minute ceiling forever. 304 is
-	 * a healthy answer (it's how the ETag polls say "unchanged"), so it counts as success.
+	 * <p>{@code endpoint}, {@code identity} and {@code payload} say what was sent, so a refusal that
+	 * retrying can't fix is parked rather than re-posted every sweep: a name linked to another
+	 * RuneTools account (409, or 403 {@code rsn_taken}) holds the endpoint until the character or key
+	 * changes, and a 400/413 holds that exact payload until it changes. Neither is an outage or a bad
+	 * key, so neither slows the loop down or counts toward the rejected-key halt.
+	 *
+	 * <p>Returns the outcome so the caller can decide whether to keep the payload queued.
 	 */
-	private void noteSyncResult(int code)
+	private SyncResponse.Outcome noteSyncResult(Response r, String endpoint, String identity, long payload)
 	{
-		if ((code >= 200 && code < 300) || code == 304)
+		int code = r.code();
+		String errorCode = SyncResponse.needsErrorCode(code) ? errorCodeOf(r) : null;
+		SyncResponse.Outcome outcome = SyncResponse.classify(code, errorCode);
+		switch (outcome)
 		{
-			resumeSync();
-			return;
+			case OK:
+				parking.release(endpoint, identity);
+				resumeSync();
+				break;
+			case IGNORED:
+				break;
+			case NAME_TAKEN:
+				parking.parkName(endpoint, identity);
+				updatePanelStatic();
+				log.info("RuneTools: {} refused (HTTP {}) - this character's name is linked to another RuneTools"
+					+ " account; holding it until the character or key changes", endpoint, code);
+				break;
+			case PAYLOAD_REJECTED:
+				parking.parkPayload(endpoint, identity, payload);
+				log.info("RuneTools: {} rejected the payload (HTTP {}) - holding it until it changes", endpoint, code);
+				break;
+			case RATE_LIMITED:
+				long now = System.currentTimeMillis();
+				long wait = SyncResponse.retryAfterMillis(r.header("Retry-After"), now, RETRY_AFTER_MAX_MS);
+				if (wait > 0)
+				{
+					// Set before the once-per-sweep charge below, so it holds even when another response
+					// already charged this sweep.
+					retryAfterUntilMillis.accumulateAndGet(now + wait, Math::max);
+					log.debug("RuneTools: rate limited - server asked for {}s", wait / 1000L);
+				}
+				chargeSyncFailure(code, false);
+				break;
+			case KEY_REJECTED:
+				chargeSyncFailure(code, true);
+				break;
+			default:
+				chargeSyncFailure(code, false);
+				break;
 		}
-		if (code == 404)
+		return outcome;
+	}
+
+	/** The {@code code} of a JSON error body, read without buffering more than a small error page. */
+	private static String errorCodeOf(Response r)
+	{
+		try
 		{
-			return;
+			return r.body() != null ? SyncResponse.errorCode(r.peekBody(16 * 1024).string()) : null;
 		}
+		catch (IOException | RuntimeException ex)
+		{
+			return null;
+		}
+	}
+
+	/**
+	 * Charge one failed response to the loop's backoff ({@code code} is 0 for a transport failure).
+	 * {@code keyRejected} marks a 401 (or a 403 that isn't a name conflict), which also counts toward
+	 * stopping the loop outright.
+	 */
+	private void chargeSyncFailure(int code, boolean keyRejected)
+	{
 		// One sweep fires a dozen requests, so charge only the FIRST bad response of each. Otherwise a
 		// single outage would count a dozen failures at once and vault straight to the ceiling (and
 		// trip the rejected-key halt) before we had retried even once.
@@ -1067,7 +1154,7 @@ public class RuneToolsPlugin extends Plugin
 		{
 			return;
 		}
-		if (code == 401 || code == 403)
+		if (keyRejected)
 		{
 			if (authFailures.incrementAndGet() >= SYNC_AUTH_FAILURES_MAX)
 			{
@@ -1082,12 +1169,30 @@ public class RuneToolsPlugin extends Plugin
 		}
 		else
 		{
-			authFailures.set(0);   // "consecutive" 401/403 - any other failure breaks the streak
+			authFailures.set(0);   // "consecutive" rejections - any other failure breaks the streak
 		}
 		int fails = syncFailures.incrementAndGet();
 		long wait = Math.min(SYNC_BACKOFF_MAX_MS, SYNC_PERIOD_MS << Math.min(fails, 5));
 		nextSyncAtMillis = System.currentTimeMillis() + wait;
 		log.debug("RuneTools: sync failure #{} (HTTP {}) - next sweep in {}s", fails, code, wait / 1000L);
+	}
+
+	/**
+	 * Who a background request goes out as: the character (name + account hash) and the key it
+	 * authenticates with. Parks are scoped to this, so another character, a rename or a newly-issued
+	 * key always gets a fresh try. Only the key's hash is kept.
+	 */
+	private String syncIdentity(String rsn, String accountHash)
+	{
+		return (rsn != null ? rsn : "") + '|' + (accountHash != null ? accountHash : "") + '|'
+			+ Integer.toHexString(api.activeKey().hashCode());
+	}
+
+	/** {@link #syncIdentity(String, String)} for the character logged in right now. */
+	private String syncIdentity()
+	{
+		AccountSnapshot s = snapshot.get();
+		return syncIdentity(s.rsn, s.accountHash);
 	}
 
 	/** Assemble the panel's Combat Achievements view from the last cache read. */
@@ -1176,11 +1281,16 @@ public class RuneToolsPlugin extends Plugin
 		final Map<String, JsonObject> sentPages = new LinkedHashMap<>();
 		final Map<String, Integer> sentHashes = new HashMap<>();
 		final int generation;
+		final String identity = syncIdentity();
 		synchronized (clogLock)
 		{
 			if (!clogDirty)
 			{
 				return;
+			}
+			if (parking.isNameParked(EP_COLLECTION_LOG, identity))
+			{
+				return;   // the name is linked to another account: keep it all queued for another character/key
 			}
 			generation = clogGeneration;
 			totals = clogTotals;
@@ -1225,6 +1335,14 @@ public class RuneToolsPlugin extends Plugin
 			body.add("obtained", obtained);
 		}
 		final JsonArray sentObtained = obtained;
+		final long payload = body.toString().hashCode();
+		if (parking.isParked(EP_COLLECTION_LOG, identity, payload))
+		{
+			// The server already refused exactly this. Keep it queued, unsent: a newly-read page
+			// changes the payload and earns another try.
+			requeueCollectionPages(generation, sentPages, sentHashes, sentObtained);
+			return;
+		}
 		api.postCollectionLog(body, new Callback()
 		{
 			@Override
@@ -1240,7 +1358,7 @@ public class RuneToolsPlugin extends Plugin
 			{
 				try (Response r = resp)
 				{
-					noteSyncResult(r.code());
+					noteSyncResult(r, EP_COLLECTION_LOG, identity, payload);
 					if (r.isSuccessful())
 					{
 						synchronized (clogLock)
@@ -1356,6 +1474,14 @@ public class RuneToolsPlugin extends Plugin
 			{
 				return;   // nothing changed since the last successful post
 			}
+			// What this post would carry, cheaply: the catalogue (~145 KB) or not, plus the completion
+			// state. Checked before building the body, so a refused catalogue costs nothing per sweep.
+			final String identity = syncIdentity();
+			final long payload = ((long) snap.completedHash << 1) | (sendCatalog ? 1L : 0L);
+			if (parking.isParked(EP_COMBAT_ACHIEVEMENTS, identity, payload))
+			{
+				return;   // already refused for this character (name) or for exactly this content
+			}
 			JsonObject body = new JsonObject();
 			stampIdentity(body);
 			if (sendCatalog)
@@ -1379,7 +1505,7 @@ public class RuneToolsPlugin extends Plugin
 				{
 					try (Response r = resp)
 					{
-						noteSyncResult(r.code());
+						noteSyncResult(r, EP_COMBAT_ACHIEVEMENTS, identity, payload);
 						if (r.isSuccessful())
 						{
 							caCatalogSent = true;
@@ -1398,6 +1524,11 @@ public class RuneToolsPlugin extends Plugin
 	 */
 	private void pollImportedLayouts()
 	{
+		final String identity = syncIdentity();
+		if (parking.isParked(EP_BANK_LAYOUTS, identity, 0L))
+		{
+			return;   // a GET has no payload to change, so a refusal holds until the character or key does
+		}
 		api.getBankLayouts(layoutsEtag, new Callback()
 		{
 			@Override
@@ -1412,7 +1543,7 @@ public class RuneToolsPlugin extends Plugin
 			{
 				try (Response r = resp)
 				{
-					noteSyncResult(r.code());
+					noteSyncResult(r, EP_BANK_LAYOUTS, identity, 0L);
 					if (r.code() == 304 || r.code() == 401 || !r.isSuccessful())
 					{
 						return;
@@ -2122,12 +2253,19 @@ public class RuneToolsPlugin extends Plugin
 				hashByRsn.putIfAbsent(key, hash);
 			}
 		}
-		log.info("RuneTools: flushing {} trade(s) to {}", batch.size(), api.base());
 		for (Map.Entry<String, List<Trade>> entry : byRsn.entrySet())
 		{
 			List<Trade> group = entry.getValue();
 			String rsn = entry.getKey().isEmpty() ? null : entry.getKey();
 			String hash = hashByRsn.get(entry.getKey());
+			final String endpoint = EP_TRADES + entry.getKey();
+			final String identity = syncIdentity(rsn, hash);
+			final long payload = group.hashCode();
+			if (parking.isParked(endpoint, identity, payload))
+			{
+				continue;   // refused before; the fills stay queued until the character, key or batch changes
+			}
+			log.info("RuneTools: flushing {} trade(s) to {}", group.size(), api.base());
 			api.postTrades(rsn, hash, group, new Callback()
 			{
 				@Override
@@ -2142,7 +2280,7 @@ public class RuneToolsPlugin extends Plugin
 				{
 					try (Response r = resp)
 					{
-						noteSyncResult(r.code());
+						SyncResponse.Outcome outcome = noteSyncResult(r, endpoint, identity, payload);
 						if (r.isSuccessful())
 						{
 							synchronized (pending)
@@ -2158,6 +2296,11 @@ public class RuneToolsPlugin extends Plugin
 						{
 							panel.setStatus(SYNC_REVOKED_MSG, false);
 							log.info("RuneTools: trade sync rejected (401) - bad/revoked key");
+						}
+						else if (outcome == SyncResponse.Outcome.NAME_TAKEN
+							|| outcome == SyncResponse.Outcome.PAYLOAD_REJECTED)
+						{
+							log.info("RuneTools: trade sync HTTP {} - fills kept queued, not resent as-is", r.code());
 						}
 						else
 						{
@@ -2181,12 +2324,23 @@ public class RuneToolsPlugin extends Plugin
 		{
 			return;
 		}
+		final String identity = syncIdentity();
+		if (parking.isNameParked(EP_STATE, identity))
+		{
+			return;   // the name is linked to another account; left dirty so another character or key sends it
+		}
 		// Clear up-front so a change that lands mid-request re-marks it dirty and is not lost.
 		stateDirty.set(false);
-		// Send one coherent, immutable cut (with the capture time stamped in).
-		AccountSnapshot toSend = snapshot.get().toBuilder()
-			.snapshotTsMillis(System.currentTimeMillis()).build();
-		api.postState(toSend, new Callback()
+		// Send one coherent, immutable cut. The payload hash leaves out the capture time, which
+		// differs on every send, so a refused state is recognised if nothing has changed since.
+		JsonObject body = RuneToolsApiClient.stateBody(snapshot.get());
+		final long payload = body.toString().hashCode();
+		if (parking.isParked(EP_STATE, identity, payload))
+		{
+			return;   // exactly this state was refused; the next change re-marks it dirty and is tried
+		}
+		body.addProperty("ts", System.currentTimeMillis());
+		api.postState(body, new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException ex)
@@ -2201,7 +2355,7 @@ public class RuneToolsPlugin extends Plugin
 			{
 				try (Response r = resp)
 				{
-					noteSyncResult(r.code());
+					SyncResponse.Outcome outcome = noteSyncResult(r, EP_STATE, identity, payload);
 					if (r.isSuccessful())
 					{
 						log.info("RuneTools: state synced OK");
@@ -2210,6 +2364,11 @@ public class RuneToolsPlugin extends Plugin
 					{
 						panel.setStatus(SYNC_REVOKED_MSG, false);
 						log.info("RuneTools: state sync rejected (401) - bad/revoked key");
+					}
+					else if (outcome == SyncResponse.Outcome.PAYLOAD_REJECTED)
+					{
+						// Parked, and deliberately not re-marked dirty: the next real change sends again.
+						log.info("RuneTools: state sync HTTP {} - not resending this state", r.code());
 					}
 					else
 					{
@@ -2601,6 +2760,12 @@ public class RuneToolsPlugin extends Plugin
 		else if (!config.consent())
 		{
 			panel.setStatus("Enable consent in settings", false);
+		}
+		else if (parking.anyNameParked(syncIdentity()))
+		{
+			// Sticky for the same reason: the key works and other syncs carry on, but the ones published
+			// under the in-game name (Collection Log, Combat Achievements) are held, and this says why.
+			panel.setStatus(SYNC_NAME_TAKEN_MSG, false);
 		}
 		else
 		{

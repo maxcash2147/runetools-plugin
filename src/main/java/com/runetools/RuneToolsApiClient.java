@@ -274,7 +274,11 @@ class RuneToolsApiClient
 		http.newCall(b.get().build()).enqueue(callback);
 	}
 
-	void postState(AccountSnapshot s, Callback callback)
+	/**
+	 * The {@code /state} body for a snapshot, without the capture timestamp ({@code ts}): that differs
+	 * on every send, and leaving it to the caller lets two sends of the same state be compared.
+	 */
+	static JsonObject stateBody(AccountSnapshot s)
 	{
 		JsonObject body = new JsonObject();
 		body.addProperty("rsn", s.rsn);
@@ -286,7 +290,6 @@ class RuneToolsApiClient
 		body.addProperty("members", s.members);
 		body.addProperty("gp", s.gp);
 		body.addProperty("free_slots", s.freeSlots);
-		body.addProperty("ts", s.snapshotTsMillis);
 		body.add("offers", s.offers);
 		body.add("inventory", s.inventory);
 		// Only send the bank once it's captured; omitting it tells the server to keep the last one.
@@ -313,6 +316,12 @@ class RuneToolsApiClient
 		{
 			body.add("bronzeman", s.bronzeman);
 		}
+		return body;
+	}
+
+	/** Post a {@link #stateBody} with its {@code ts} stamped in. */
+	void postState(JsonObject body, Callback callback)
+	{
 		http.newCall(authed("/api/plugin/state")
 			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
 	}

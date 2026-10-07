@@ -1917,6 +1917,9 @@ class RuneToolsPanel extends PluginPanel
 		{
 			status.setText("●  " + text);   // leading dot picks up the status colour (green ok / red not)
 			status.setForeground(ok ? ColorScheme.PROGRESS_COMPLETE_COLOR : ColorScheme.PROGRESS_ERROR_COLOR);
+			// The line is clipped to the panel width, so the full message is in the tooltip too. Plain
+			// text only, keeping the no-HTML rule the label itself follows.
+			status.setToolTipText(text != null && text.indexOf('<') < 0 ? text : null);
 		});
 	}
 

@@ -17,7 +17,6 @@ final class AccountSnapshot
 	final boolean members;
 	final long gp;
 	final int freeSlots;
-	final long snapshotTsMillis;
 	final JsonArray offers;
 	final JsonArray inventory;
 	// null until the bank is captured (Include-bank on + bank opened this session), so a sync never
@@ -38,7 +37,6 @@ final class AccountSnapshot
 		members = b.members;
 		gp = b.gp;
 		freeSlots = b.freeSlots;
-		snapshotTsMillis = b.snapshotTsMillis;
 		offers = b.offers;
 		inventory = b.inventory;
 		bank = b.bank;
@@ -71,7 +69,6 @@ final class AccountSnapshot
 		private boolean members;
 		private long gp;
 		private int freeSlots;
-		private long snapshotTsMillis;
 		private JsonArray offers = new JsonArray();
 		private JsonArray inventory = new JsonArray();
 		private JsonArray bank;
@@ -92,7 +89,6 @@ final class AccountSnapshot
 			members = s.members;
 			gp = s.gp;
 			freeSlots = s.freeSlots;
-			snapshotTsMillis = s.snapshotTsMillis;
 			offers = s.offers;
 			inventory = s.inventory;
 			bank = s.bank;
@@ -135,12 +131,6 @@ final class AccountSnapshot
 		Builder freeSlots(int v)
 		{
 			freeSlots = v;
-			return this;
-		}
-
-		Builder snapshotTsMillis(long v)
-		{
-			snapshotTsMillis = v;
 			return this;
 		}
 
