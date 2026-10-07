@@ -47,6 +47,7 @@ import net.runelite.api.Player;
 import net.runelite.api.ScriptID;
 import net.runelite.api.events.ScriptPreFired;
 import net.runelite.api.events.WidgetClosed;
+import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.widgets.JavaScriptCallback;
 import net.runelite.api.widgets.Widget;
@@ -110,6 +111,8 @@ public class RuneToolsPlugin extends Plugin
 	// Sync-loop pacing. @Schedule's period is fixed, so backoff is applied as a "not before" gate
 	// rather than by rescheduling: the tick still fires every 20s, it just does nothing until the
 	// penalty has elapsed. A rejected key can't be waited out, so that stops the loop outright.
+	// Each tick only uploads what has changed; asking the site for ITS changes (setups, imported
+	// layouts) follows the slower, separate PollSchedule.
 	private static final long SYNC_PERIOD_MS = 20_000L;                  // must match the @Schedule below
 	private static final long SYNC_BACKOFF_MAX_MS = 10L * 60L * 1000L;   // ten minutes between sweeps, at worst
 	private static final int SYNC_AUTH_FAILURES_MAX = 3;                 // consecutive rejected sweeps before we stop
@@ -183,6 +186,8 @@ public class RuneToolsPlugin extends Plugin
 	// Refusals that retrying can't fix (a name linked to another account, a payload the server can
 	// never accept), held per endpoint so they aren't re-posted every sweep. See SyncParking.
 	private final SyncParking parking = new SyncParking();
+	// When to next ask the site for setups and imported bank layouts. See PollSchedule.
+	private final PollSchedule remotePoll = new PollSchedule();
 
 	private int inventoryCoins;
 	private int bankCoins;
@@ -311,6 +316,7 @@ public class RuneToolsPlugin extends Plugin
 		bankOrganizer = new BankOrganizer(bankTagsService, tagManager, layoutManager, tabManager, itemManager,
 			clientThread, configManager);
 		setupManager.setOnDelete(id -> bankFilter.forget(id));
+		setupManager.setOnRemoteChange(remotePoll::onChanged);
 		loadoutReader = new LoadoutReader(client, itemManager);
 		loadPending();
 
@@ -320,6 +326,9 @@ public class RuneToolsPlugin extends Plugin
 			this::checkDps, this::syncAllCollectionLog, this::importInventorySetup);
 		setupManager.setOnChange(() -> panel.setSetups(setupManager.getSetups()));
 		setupManager.setOnError(msg -> panel.setStatus(msg, false));
+		// Opening the side panel is the clearest sign the player wants current setups: poll now
+		// instead of waiting out the backoff.
+		panel.setOnOpened(() -> requestRemotePoll(PollSchedule.PANEL_GAP_MS));
 		panel.setMissingComputer(this::computeMissingItems);
 		loadSpellbookIcons();
 		navButton = NavigationButton.builder()
@@ -386,6 +395,22 @@ public class RuneToolsPlugin extends Plugin
 			// Whoever logs in next gets a clean slate: a different character has a different key, and
 			// even the same one may have been reconnected on the site while we sat at the login screen.
 			resumeSync();
+			// ...and a fresh look at the site's setups as soon as they're in. A world hop keeps the
+			// same character, so it keeps the current backoff rather than polling on every hop.
+			if (e.getGameState() != GameState.HOPPING)
+			{
+				remotePoll.reset();
+			}
+		}
+	}
+
+	/** Opening the bank is when setups and imported layouts get used, so fetch any new ones. */
+	@Subscribe
+	public void onWidgetLoaded(WidgetLoaded e)
+	{
+		if (e.getGroupId() == InterfaceID.BANKMAIN)
+		{
+			requestRemotePoll(PollSchedule.BANK_GAP_MS);
 		}
 	}
 
@@ -408,6 +433,12 @@ public class RuneToolsPlugin extends Plugin
 			s.addProperty("level", client.getRealSkillLevel(sk));
 			s.addProperty("xp", client.getSkillExperience(sk));
 			skills.add(sk.getName().toLowerCase(), s);
+		}
+		// StatChanged also fires for boosted levels (hitpoints regenerating, a potion wearing off),
+		// which leave real levels and XP alone. Only an actual change is worth an upload.
+		if (skills.equals(snapshot.get().skills))
+		{
+			return;
 		}
 		snapshot.updateAndGet(s -> s.toBuilder().skills(skills).build());
 		stateDirty.set(true);
@@ -694,6 +725,11 @@ public class RuneToolsPlugin extends Plugin
 			inventoryCoins = c.count(COINS_ITEM_ID);
 			final JsonArray inv = itemsToArray(c);
 			final long gp = (long) inventoryCoins + (long) bankCoins;
+			AccountSnapshot before = snapshot.get();
+			if (inv.equals(before.inventory) && gp == before.gp)
+			{
+				return;   // same items (e.g. only rearranged): nothing new to upload
+			}
 			snapshot.updateAndGet(s -> s.toBuilder().inventory(inv).gp(gp).build());
 			stateDirty.set(true);
 		}
@@ -702,6 +738,11 @@ public class RuneToolsPlugin extends Plugin
 			bankCoins = c.count(COINS_ITEM_ID);
 			final JsonArray bank = config.syncBank() ? itemsToArray(c) : null;
 			final long gp = (long) inventoryCoins + (long) bankCoins;
+			AccountSnapshot before = snapshot.get();
+			if (gp == before.gp && (bank == null || bank.equals(before.bank)))
+			{
+				return;
+			}
 			snapshot.updateAndGet(s -> s.toBuilder().gp(gp).bank(bank != null ? bank : s.bank).build());
 			stateDirty.set(true);
 		}
@@ -907,11 +948,7 @@ public class RuneToolsPlugin extends Plugin
 		{
 			log.debug("RuneTools: state sync waiting for in-game identity (RSN not captured yet)");
 		}
-		if (config.syncSetups())
-		{
-			setupManager.poll();             // full pull + ETag -> 304 when unchanged
-			pollImportedLayouts();           // apply bank layouts imported on the site
-		}
+		pollRemoteIfDue();                   // setups + imported layouts, on their own slower schedule
 		if (config.syncCombatAchievements())
 		{
 			syncCombatAchievements();
@@ -921,6 +958,36 @@ public class RuneToolsPlugin extends Plugin
 			refreshCollectionTotals();   // keep overall progress fresh even if the log isn't open
 			syncCollectionLog();
 		}
+	}
+
+	/**
+	 * Ask the site for setup and bank-layout changes, if {@link #remotePoll} says one is due. Both
+	 * requests are ETag polls (a 304 when nothing changed) and are only queued here, so this returns
+	 * at once and is safe from any thread. Gated like the rest of the background loop: nothing goes
+	 * out unless a connected, consenting character is logged in and the server isn't backing us off.
+	 */
+	private void pollRemoteIfDue()
+	{
+		if (!config.syncSetups() || !syncAllowed() || System.currentTimeMillis() < nextSyncAtMillis)
+		{
+			return;
+		}
+		if (!remotePoll.tryStart(System.currentTimeMillis()))
+		{
+			return;
+		}
+		setupManager.poll();             // full pull + ETag -> 304 when unchanged
+		pollImportedLayouts();           // apply bank layouts imported on the site
+	}
+
+	/**
+	 * The player is about to use synced data (opened the side panel or the bank): poll now, or as soon
+	 * as {@code minGap} has passed since the last poll, instead of waiting out the backoff.
+	 */
+	private void requestRemotePoll(long minGap)
+	{
+		remotePoll.pollSoon(System.currentTimeMillis(), minGap);
+		pollRemoteIfDue();
 	}
 
 	/**
@@ -1417,7 +1484,8 @@ public class RuneToolsPlugin extends Plugin
 		{
 			return;   // a GET has no payload to change, so a refusal holds until the character or key does
 		}
-		api.getBankLayouts(layoutsEtag, new Callback()
+		final String sentEtag = layoutsEtag;
+		api.getBankLayouts(sentEtag, new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException ex)
@@ -1438,9 +1506,14 @@ public class RuneToolsPlugin extends Plugin
 					}
 					String body = RuneToolsApiClient.readBoundedBody(r);
 					JsonObject o = new JsonParser().parse(body).getAsJsonObject();
-					if (o.has("etag") && !o.get("etag").isJsonNull())
+					String received = o.has("etag") && !o.get("etag").isJsonNull() ? o.get("etag").getAsString() : null;
+					if (received != null)
 					{
-						layoutsEtag = o.get("etag").getAsString();
+						layoutsEtag = received;
+					}
+					if (SetupManager.etagChanged(sentEtag, received))
+					{
+						remotePoll.onChanged();   // something was added on the site; more may follow
 					}
 					JsonArray arr = o.getAsJsonArray("layouts");
 					if (arr == null)
@@ -1489,8 +1562,8 @@ public class RuneToolsPlugin extends Plugin
 						}
 						int icon = l.has("icon_item_id") && !l.get("icon_item_id").isJsonNull()
 							? asInt(l, "icon_item_id", -1) : -1;
-						// Mark applied FIRST so a payload that somehow still errors can never loop on
-						// every 20s poll; the allocation is already bounded in cellsToArray.
+						// Mark applied FIRST so a payload that somehow still errors can never be
+						// re-applied on every poll; the allocation is already bounded in cellsToArray.
 						applied.add(id);
 						changed = true;
 						try

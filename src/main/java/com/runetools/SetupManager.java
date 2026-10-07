@@ -22,7 +22,8 @@ import okhttp3.Response;
 /**
  * Pulls the user's gear setups from RuneTools, caches them (persisted via ConfigManager so they
  * survive restarts), and tracks which one is "active". Polling uses a full pull with an
- * {@code If-None-Match} ETag, so an unchanged server returns 304.
+ * {@code If-None-Match} ETag, so an unchanged server returns 304. How often it polls is the
+ * plugin's call ({@link PollSchedule}).
  */
 @Slf4j
 class SetupManager
@@ -41,6 +42,7 @@ class SetupManager
 	private volatile Runnable onChange = () -> { };
 	private volatile Consumer<Long> onDelete = id -> { };
 	private volatile Consumer<String> onError = m -> { };
+	private volatile Runnable onRemoteChange = () -> { };
 
 	// One update PUT in flight at a time; edits that arrive during it coalesce (latest wins per setup)
 	// so two quick edits can't race on the wire and clobber each other.
@@ -68,6 +70,21 @@ class SetupManager
 	void setOnError(Consumer<String> c)
 	{
 		this.onError = c != null ? c : m -> { };
+	}
+
+	/**
+	 * Called when a poll finds the setups changed on the site since the last one (a new ETag). Not
+	 * called for the first pull, or for the pull that follows one of our own writes.
+	 */
+	void setOnRemoteChange(Runnable r)
+	{
+		this.onRemoteChange = r != null ? r : () -> { };
+	}
+
+	/** True when a poll sent with {@code sent} came back with a different, real ETag. */
+	static boolean etagChanged(String sent, String received)
+	{
+		return sent != null && !sent.isEmpty() && received != null && !received.equals(sent);
 	}
 
 	List<GearSetup> getSetups()
@@ -100,7 +117,8 @@ class SetupManager
 
 	void poll()
 	{
-		api.getSetups(etag, new Callback()
+		final String sentEtag = etag;
+		api.getSetups(sentEtag, new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException ex)
@@ -171,12 +189,17 @@ class SetupManager
 					{
 						onDelete.accept(id);
 					}
-					if (o.has("etag") && !o.get("etag").isJsonNull())
+					String received = o.has("etag") && !o.get("etag").isJsonNull() ? o.get("etag").getAsString() : null;
+					if (received != null)
 					{
-						etag = o.get("etag").getAsString();
+						etag = received;
 					}
 					persist(arr);
 					onChange.run();
+					if (etagChanged(sentEtag, received))
+					{
+						onRemoteChange.run();
+					}
 					log.debug("RuneTools: {} gear setup(s) synced", parsed.size());
 				}
 				catch (Exception ex)

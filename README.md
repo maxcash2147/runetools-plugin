@@ -65,6 +65,24 @@ collected. Nothing is sent until you accept the consent toggle **and** connect t
 each automatic sync can be switched off in the plugin settings. The in-client consent warning
 carries the same list.
 
+## Network use
+
+The plugin talks only to the RuneTools server (`https://runetools.com`, or the **Server URL** you
+set), only over HTTPS, and only while a connected, consenting character is logged in. Nothing is
+sent from the login screen.
+
+- **Uploads** (trades, account state, Combat Achievements, Collection Log) go out only when
+  something actually changed, checked every 20 seconds. A completed GE buy is sent straight away.
+- **Changes made on the website** (gear setups, bank layouts you imported) are fetched with ETag
+  requests that cost a `304` when nothing changed. They start 30 seconds apart and back off to once
+  every 5 minutes while nothing changes, so an idle logged-in client makes fewer than 600 of these
+  requests a day. Opening the RuneTools side panel or your bank fetches them right away (at most
+  once every 10 and 60 seconds respectively), and a change found on the site brings the 30-second
+  gap back.
+- If the server is unreachable or rate-limits the plugin, the whole loop backs off (up to 10
+  minutes, or as long as a `429`'s `Retry-After` asks, capped at an hour), and a key the server keeps
+  rejecting stops the loop until you reconnect the character.
+
 ## Build & run (development)
 
 Requires a JDK 11+ and the RuneLite Gradle setup (this repo is generated from

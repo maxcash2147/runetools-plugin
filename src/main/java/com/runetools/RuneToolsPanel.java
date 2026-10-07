@@ -242,6 +242,7 @@ class RuneToolsPanel extends PluginPanel
 	private final Consumer<String> onConvertTab;
 	private final Runnable onExportTag;
 	private Runnable onSyncAllClog = () -> { };
+	private volatile Runnable onOpened = () -> { };
 
 	private final JPanel bankSection = new JPanel();
 	// bankStatus echoes imported-layout names (server-supplied) - keep it plain-text only.
@@ -1907,6 +1908,18 @@ class RuneToolsPanel extends PluginPanel
 	private static String fmtGp(long v)
 	{
 		return String.format("%,d", v);
+	}
+
+	/** Run when the player opens this side panel (the plugin uses it to fetch fresh setups). */
+	void setOnOpened(Runnable r)
+	{
+		onOpened = r != null ? r : () -> { };
+	}
+
+	@Override
+	public void onActivate()
+	{
+		onOpened.run();
 	}
 
 	// -- status setters ------------------------------------------------------ //
