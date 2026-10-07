@@ -79,9 +79,9 @@ class OfferTracker
 			|| prev.getTotalQuantity() != cur.getTotalQuantity();
 
 		int prevQty = newOffer ? 0 : prev.getQuantitySold();
-		int prevSpent = newOffer ? 0 : prev.getSpent();
+		long prevSpent = newOffer ? 0 : prev.getSpent();
 		int qtyDiff = cur.getQuantitySold() - prevQty;
-		int spentDiff = cur.getSpent() - prevSpent;
+		long spentDiff = cur.getSpent() - prevSpent;
 
 		set(slot, cur);
 
@@ -91,7 +91,7 @@ class OfferTracker
 		}
 
 		// Exact integer half-up rounding (both diffs are > 0 here): avoids float precision loss.
-		int unitPrice = (int) (((long) spentDiff + qtyDiff / 2) / qtyDiff);
+		long unitPrice = (spentDiff + qtyDiff / 2) / qtyDiff;
 		String side = isBuy(state) ? "buy" : "sell";
 		String extId = slot + ":" + cur.getItemId() + ":" + side + ":" + cur.getQuantitySold();
 		return new Trade(cur.getItemId(), side, qtyDiff, unitPrice, System.currentTimeMillis(),

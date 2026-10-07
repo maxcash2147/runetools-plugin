@@ -282,7 +282,7 @@ class BankOrganizer
 	private int mostValuable(List<Integer> bankItemIds)
 	{
 		int bestId = -1;
-		int bestPrice = -1;
+		long bestPrice = -1;
 		for (Integer raw : bankItemIds)
 		{
 			if (raw == null || raw <= 0)
@@ -290,7 +290,7 @@ class BankOrganizer
 				continue;
 			}
 			int id = itemManager.canonicalize(raw);
-			int price;
+			long price;
 			try
 			{
 				price = itemManager.getItemPrice(id);

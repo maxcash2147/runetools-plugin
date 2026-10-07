@@ -1763,7 +1763,7 @@ public class RuneToolsPlugin extends Plugin
 				long price = 0;
 				try
 				{
-					price = (long) itemManager.getItemPrice(id) * qty;
+					price = itemManager.getItemPrice(id) * qty;
 				}
 				catch (RuntimeException ignored)
 				{
@@ -2726,12 +2726,7 @@ public class RuneToolsPlugin extends Plugin
 			List<Trade> loaded = new ArrayList<>();
 			for (JsonElement el : arr)
 			{
-				JsonObject o = el.getAsJsonObject();
-				loaded.add(new Trade(
-					o.get("itemId").getAsInt(), o.get("side").getAsString(),
-					o.get("qty").getAsInt(), o.get("price").getAsInt(),
-					o.get("tsMillis").getAsLong(), o.get("extId").getAsString(),
-					str(o, "rsn"), str(o, "accountHash")));
+				loaded.add(Trade.fromPendingJson(el.getAsJsonObject()));
 			}
 			synchronized (pending)
 			{
@@ -2758,19 +2753,7 @@ public class RuneToolsPlugin extends Plugin
 				JsonArray arr = new JsonArray();
 				for (Trade t : pending)
 				{
-					JsonObject o = new JsonObject();
-					o.addProperty("itemId", t.getItemId());
-					o.addProperty("side", t.getSide());
-					o.addProperty("qty", t.getQty());
-					o.addProperty("price", t.getPrice());
-					o.addProperty("tsMillis", t.getTsMillis());
-					o.addProperty("extId", t.getExtId());
-					o.addProperty("rsn", t.getRsn());
-					if (t.getAccountHash() != null)
-					{
-						o.addProperty("accountHash", t.getAccountHash());
-					}
-					arr.add(o);
+					arr.add(t.toPendingJson());
 				}
 				if (arr.size() == 0)
 				{
@@ -2786,12 +2769,6 @@ public class RuneToolsPlugin extends Plugin
 		{
 			log.debug("Could not persist pending trades: {}", ex.getMessage());
 		}
-	}
-
-	private static String str(JsonObject o, String key)
-	{
-		JsonElement e = o.get(key);
-		return e != null && !e.isJsonNull() ? e.getAsString() : null;
 	}
 
 	/** Null-safe string accessor with a fallback (untrusted-JSON friendly). */

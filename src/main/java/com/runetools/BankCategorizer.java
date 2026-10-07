@@ -199,14 +199,14 @@ class BankCategorizer
 				}
 				for (List<Integer> slotRow : bySlot.values())
 				{
-					slotRow.sort(Comparator.comparingInt((Integer id) -> price(id)).reversed()
+					slotRow.sort(Comparator.comparingLong((Integer id) -> price(id)).reversed()
 						.thenComparing(this::name));
 					rows.add(slotRow);         // one row per slot, best-first
 				}
 			}
 			else
 			{
-				group.sort(Comparator.comparingInt((Integer id) -> price(id)).reversed()
+				group.sort(Comparator.comparingLong((Integer id) -> price(id)).reversed()
 					.thenComparing(this::name));
 				rows.add(group);
 			}
@@ -376,7 +376,7 @@ class BankCategorizer
 		return slot >= 0 && slot < SLOT_ORDER.length ? SLOT_ORDER[slot] : 90;
 	}
 
-	private int price(int id)
+	private long price(int id)
 	{
 		try
 		{
