@@ -797,7 +797,7 @@ public class RuneToolsPlugin extends Plugin
 			queuePending(t);
 			savePending();
 			updatePanelStatic();
-			log.info("RuneTools: queued {} {} x item {} @ {}gp",
+			log.debug("RuneTools: queued {} {} x item {} @ {}gp",
 				t.getSide(), t.getQty(), t.getItemId(), t.getPrice());
 			// A buy fill is what the site's holdings/P-L view is most often waiting on, so expedite the
 			// flush instead of leaving it to the next 20s sweep.
@@ -1052,12 +1052,12 @@ public class RuneToolsPlugin extends Plugin
 			case NAME_TAKEN:
 				parking.parkName(endpoint, identity);
 				updatePanelStatic();
-				log.info("RuneTools: {} refused (HTTP {}) - this character's name is linked to another RuneTools"
+				log.debug("RuneTools: {} refused (HTTP {}) - this character's name is linked to another RuneTools"
 					+ " account; holding it until the character or key changes", endpoint, code);
 				break;
 			case PAYLOAD_REJECTED:
 				parking.parkPayload(endpoint, identity, payload);
-				log.info("RuneTools: {} rejected the payload (HTTP {}) - holding it until it changes", endpoint, code);
+				log.debug("RuneTools: {} rejected the payload (HTTP {}) - holding it until it changes", endpoint, code);
 				break;
 			case RATE_LIMITED:
 				long now = System.currentTimeMillis();
@@ -1117,7 +1117,7 @@ public class RuneToolsPlugin extends Plugin
 				// posting a dead key at the server until the client is closed.
 				authRevoked = true;
 				updatePanelStatic();
-				log.info("RuneTools: sync stopped after {} rejected sweeps - reconnect this character",
+				log.warn("RuneTools: sync stopped after {} rejected sweeps - reconnect this character",
 					SYNC_AUTH_FAILURES_MAX);
 				return;
 			}
@@ -2226,14 +2226,14 @@ public class RuneToolsPlugin extends Plugin
 			{
 				continue;   // refused before; the fills stay queued until the character, key or batch changes
 			}
-			log.info("RuneTools: flushing {} trade(s) to {}", group.size(), api.base());
+			log.debug("RuneTools: flushing {} trade(s) to {}", group.size(), api.base());
 			api.postTrades(rsn, hash, group, new Callback()
 			{
 				@Override
 				public void onFailure(Call call, IOException ex)
 				{
 					noteSyncFailure();
-					log.info("RuneTools: trade sync failed (will retry): {}", ex.getMessage());
+					log.debug("RuneTools: trade sync failed (will retry): {}", ex.getMessage());
 				}
 
 				@Override
@@ -2251,21 +2251,21 @@ public class RuneToolsPlugin extends Plugin
 							savePending();
 							panel.setLastSync(nowString());
 							updatePanelStatic();
-							log.info("RuneTools: synced {} trade(s) OK", group.size());
+							log.debug("RuneTools: synced {} trade(s) OK", group.size());
 						}
 						else if (r.code() == 401)
 						{
 							panel.setStatus(SYNC_REVOKED_MSG, false);
-							log.info("RuneTools: trade sync rejected (401) - bad/revoked key");
+							log.debug("RuneTools: trade sync rejected (401) - bad/revoked key");
 						}
 						else if (outcome == SyncResponse.Outcome.NAME_TAKEN
 							|| outcome == SyncResponse.Outcome.PAYLOAD_REJECTED)
 						{
-							log.info("RuneTools: trade sync HTTP {} - fills kept queued, not resent as-is", r.code());
+							log.debug("RuneTools: trade sync HTTP {} - fills kept queued, not resent as-is", r.code());
 						}
 						else
 						{
-							log.info("RuneTools: trade sync HTTP {} (will retry)", r.code());
+							log.debug("RuneTools: trade sync HTTP {} (will retry)", r.code());
 						}
 					}
 				}
@@ -2306,7 +2306,7 @@ public class RuneToolsPlugin extends Plugin
 			{
 				stateDirty.set(true);
 				noteSyncFailure();
-				log.info("RuneTools: state sync failed (will retry): {}", ex.getMessage());
+				log.debug("RuneTools: state sync failed (will retry): {}", ex.getMessage());
 			}
 
 			@Override
@@ -2317,22 +2317,22 @@ public class RuneToolsPlugin extends Plugin
 					SyncResponse.Outcome outcome = noteSyncResult(r, EP_STATE, identity, payload);
 					if (r.isSuccessful())
 					{
-						log.info("RuneTools: state synced OK");
+						log.debug("RuneTools: state synced OK");
 					}
 					else if (r.code() == 401)
 					{
 						panel.setStatus(SYNC_REVOKED_MSG, false);
-						log.info("RuneTools: state sync rejected (401) - bad/revoked key");
+						log.debug("RuneTools: state sync rejected (401) - bad/revoked key");
 					}
 					else if (outcome == SyncResponse.Outcome.PAYLOAD_REJECTED)
 					{
 						// Parked, and deliberately not re-marked dirty: the next real change sends again.
-						log.info("RuneTools: state sync HTTP {} - not resending this state", r.code());
+						log.debug("RuneTools: state sync HTTP {} - not resending this state", r.code());
 					}
 					else
 					{
 						stateDirty.set(true);
-						log.info("RuneTools: state sync HTTP {} (will retry)", r.code());
+						log.debug("RuneTools: state sync HTTP {} (will retry)", r.code());
 					}
 				}
 			}
@@ -2723,7 +2723,7 @@ public class RuneToolsPlugin extends Plugin
 			{
 				// Worth a line in the log: losing a fill is only ever the symptom of a much longer
 				// outage, and this is the one place that says so.
-				log.info("RuneTools: unsynced-trade queue full ({}) - dropping the oldest fill",
+				log.warn("RuneTools: unsynced-trade queue full ({}) - dropping the oldest fill",
 					MAX_PENDING_TRADES);
 				trimPending();
 			}
