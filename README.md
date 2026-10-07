@@ -76,7 +76,7 @@ which is also where a key is revoked.
 | Bank contents | only if you enable **Include bank**, and only when you open the bank | holdings P/L, best-loadout-from-bank |
 
 That is the complete list: nothing else about the account, your client or other players is
-collected. Nothing is sent until you accept the consent toggle **and** connect the character, and
+sent. Nothing is sent until you accept the consent toggle **and** connect the character, and
 each automatic sync can be switched off in the plugin settings. The in-client consent warning
 carries the same list.
 

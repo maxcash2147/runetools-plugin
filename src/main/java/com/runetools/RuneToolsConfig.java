@@ -76,7 +76,8 @@ public interface RuneToolsConfig extends Config
 			+ "or update that setup.\n"
 			+ "- A bank tab's item layout, only when you export it to share it.\n"
 			+ "- Your bank contents, only if you turn on \"Include bank\".\n"
-			+ "Each of these can be switched off under \"What to sync\" and \"Gear setups\".\n"
+			+ "Nothing else is sent. The automatic syncs can each be switched off under \"What to "
+			+ "sync\" and \"Gear setups\".\n"
 			// The Plugin Hub requires this sentence, near enough verbatim, on any config item that
 			// turns on a third-party-server feature. Without it the plugin fails review.
 			+ "This feature submits your IP address to a 3rd-party server not controlled or verified "
@@ -137,7 +138,9 @@ public interface RuneToolsConfig extends Config
 	@ConfigItem(
 		keyName = "syncSetups",
 		name = "Sync gear setups",
-		description = "Pull the gear/inventory loadouts you saved on RuneTools so you can filter your bank to them in-game.",
+		description = "Pull the gear/inventory loadouts you saved on RuneTools so you can filter your bank to them in-game, "
+			+ "and add bank layouts you imported on the site as bank tabs. Checked when you open the RuneTools panel "
+			+ "or your bank, and every few minutes otherwise.",
 		section = setupsSection,
 		position = 0
 	)
