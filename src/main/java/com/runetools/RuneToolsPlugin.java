@@ -209,19 +209,19 @@ public class RuneToolsPlugin extends Plugin
 	private volatile int clogTotalsHash;
 	private volatile boolean clogDirty;
 
-	// Whole-log capture. Opening the Collection Log asks the SERVER to transmit every entry once
-	// (CollectionLog.requestFullLog), and each entry arrives as its own COLLECTION_TRANSMIT script
-	// pre-fire. We collect them into clogAll and flush a couple of ticks after the stream stops.
-	// This replaces an earlier version that clicked through every page itself: one button press
-	// drove minutes of synthesised interface actions, which is both slow and exactly the kind of
-	// automation the Plugin Hub rejects. Client thread only, except clogAllTick which onGameTick reads.
+	// Whole-log capture. When the player opens their Collection Log, the plugin asks the SERVER to
+	// transmit every entry once (CollectionLog.requestFullLog, which documents why that request is
+	// allowed), and each entry arrives as its own COLLECTION_TRANSMIT script pre-fire. We collect
+	// them into clogAll and flush a couple of ticks after the stream stops. Only ever triggered by
+	// the player opening the log: never from the side panel, a timer or any other event. Client
+	// thread only.
 	private static final int CLOG_MAX_ITEMS = 5000;   // the real log is ~1,600; caps a hostile/garbled stream
 	private static final int CLOG_REQUEST_TIMEOUT_TICKS = 10;   // no entries by now = the request didn't take
 	private final Map<Integer, Integer> clogAll = new LinkedHashMap<>();   // item id -> quantity
 	private int clogAllTick = -1;          // tick of the last transmit; -1 = no stream in progress
 	private int clogRequestTick = -1;      // tick we asked the server; watchdog for a request that never lands
-	private boolean clogRequested;         // already asked the server this time the log was opened
-	private boolean clogAllPending;        // a completed stream is waiting to be sent
+	private boolean clogRequested;         // a whole-log request is in flight (until its stream settles)
+	private boolean clogAskedThisOpen;     // already asked once since the player last opened the log
 	private volatile JsonArray clogObtained;   // the complete obtained set, pending send
 	// Bumped whenever the queues are discarded (someone else's log, logout, character switch), so a
 	// request already in flight can't put stale pages back after the fact.
@@ -323,7 +323,7 @@ public class RuneToolsPlugin extends Plugin
 		panel = new RuneToolsPanel(this::onFilterSetup, this::onClearFilter, itemManager,
 			this::addCurrentSetup, this::updateFromGear, this::pushSetup, this::deleteSetup, slotEditor, this::openHistory,
 			this::organizeBank, this::removeOrganizedTabs, this::convertBankTab, this::exportBankTag, this::openSiteLogin,
-			this::checkDps, this::syncAllCollectionLog, this::importInventorySetup);
+			this::checkDps, this::importInventorySetup);
 		setupManager.setOnChange(() -> panel.setSetups(setupManager.getSetups()));
 		setupManager.setOnError(msg -> panel.setStatus(msg, false));
 		// Opening the side panel is the clearest sign the player wants current setups: poll now
@@ -404,13 +404,17 @@ public class RuneToolsPlugin extends Plugin
 		}
 	}
 
-	/** Opening the bank is when setups and imported layouts get used, so fetch any new ones. */
 	@Subscribe
 	public void onWidgetLoaded(WidgetLoaded e)
 	{
 		if (e.getGroupId() == InterfaceID.BANKMAIN)
 		{
+			// Opening the bank is when setups and imported layouts get used, so fetch any new ones.
 			requestRemotePoll(PollSchedule.BANK_GAP_MS);
+		}
+		else if (e.getGroupId() == CollectionLog.GROUP)
+		{
+			clogAskedThisOpen = false;   // a fresh opening of the log may ask for the whole log once
 		}
 	}
 
@@ -483,8 +487,8 @@ public class RuneToolsPlugin extends Plugin
 	private void finishCollectionLogStream()
 	{
 		// Watchdog: if the request never produced a single entry (a game update moves the search
-		// op, or the menu action is swallowed), re-arm instead of leaving the feature off for the
-		// rest of the session - clogRequested is what stops us asking again.
+		// op, or the menu action is swallowed), stop waiting for it so the pages the player opens
+		// are captured again. The next opening of the log asks once more; nothing retries before.
 		if (clogRequested && clogAllTick < 0 && clogRequestTick >= 0
 			&& client.getTickCount() - clogRequestTick > CLOG_REQUEST_TIMEOUT_TICKS)
 		{
@@ -497,7 +501,7 @@ public class RuneToolsPlugin extends Plugin
 			return;
 		}
 		clogAllTick = -1;
-		clogRequested = false;   // the stream is done; opening the log again may ask for it again
+		clogRequested = false;   // the stream is done; page draws count again
 		clogRequestTick = -1;
 		if (CollectionLog.isOtherPlayers(client) || clogAll.isEmpty())
 		{
@@ -519,7 +523,6 @@ public class RuneToolsPlugin extends Plugin
 			clogObtained = obtained;
 			clogDirty = true;
 		}
-		clogAllPending = true;
 		if (panel != null)
 		{
 			if (parking.isNameParked(EP_COLLECTION_LOG, syncIdentity()))
@@ -552,6 +555,7 @@ public class RuneToolsPlugin extends Plugin
 		clogAll.clear();
 		clogAllTick = -1;
 		clogRequested = false;
+		clogAskedThisOpen = false;
 		clogRequestTick = -1;
 		synchronized (clogLock)
 		{
@@ -592,7 +596,7 @@ public class RuneToolsPlugin extends Plugin
 	 */
 	private void collectTransmittedClogItem(ScriptPreFired e)
 	{
-		if (!config.syncCollectionLog() || CollectionLog.isOtherPlayers(client))
+		if (!collectionLogSyncOn() || CollectionLog.isOtherPlayers(client))
 		{
 			return;
 		}
@@ -611,19 +615,29 @@ public class RuneToolsPlugin extends Plugin
 	}
 
 	/**
-	 * Collection-log interface events. SETUP means the log was just opened: ask the server for the
-	 * whole thing once. DRAW means a page was rendered: capture it, which is what gives pages their
-	 * names and per-page grouping.
+	 * Whether anything read from the Collection Log can actually be synced: the setting is on, the
+	 * player has consented and this character is connected. Nothing is read, and no request is made,
+	 * otherwise.
+	 */
+	private boolean collectionLogSyncOn()
+	{
+		return config.syncCollectionLog() && hasKeyAndConsent();
+	}
+
+	/**
+	 * Collection-log interface events. SETUP means the player just opened the log: ask the server
+	 * for the whole thing, once per opening. DRAW means a page was rendered: capture it, which is
+	 * what gives pages their names and per-page grouping.
 	 *
 	 * <p>Both bail out when the log on screen is someone else's, viewed through their POH Adventure
-	 * Log. Runs on the client thread.
+	 * Log, and when Collection Log syncing is off, unconsented or not connected. Client thread.
 	 */
 	@Subscribe
 	public void onScriptPostFired(ScriptPostFired e)
 	{
 		if (e.getScriptId() == CollectionLog.SETUP_SCRIPT)
 		{
-			if (!config.syncCollectionLog())
+			if (!collectionLogSyncOn())
 			{
 				return;
 			}
@@ -632,9 +646,11 @@ public class RuneToolsPlugin extends Plugin
 				discardCollectionCapture();   // theirs: drop anything the open queued
 				return;
 			}
-			// requestFullLog re-fires SETUP, so only ask once per time the log is opened.
-			if (!clogRequested)
+			// Once per opening (requestFullLog itself re-fires SETUP, and the flag only resets when
+			// the interface is opened or closed again).
+			if (!clogAskedThisOpen)
 			{
+				clogAskedThisOpen = true;
 				clogRequested = true;
 				clogRequestTick = client.getTickCount();
 				clogAll.clear();
@@ -642,7 +658,7 @@ public class RuneToolsPlugin extends Plugin
 			}
 			return;
 		}
-		if (e.getScriptId() != CollectionLog.DRAW_SCRIPT || !config.syncCollectionLog())
+		if (e.getScriptId() != CollectionLog.DRAW_SCRIPT || !collectionLogSyncOn())
 		{
 			return;
 		}
@@ -1186,45 +1202,6 @@ public class RuneToolsPlugin extends Plugin
 		panel.setCaProgress(overall, next, rows);
 	}
 
-	/**
-	 * One click: sync your WHOLE Collection Log. Requires the log to be open in-game, then asks the
-	 * server to transmit every entry at once - a single action, no clicking through pages. It
-	 * changes nothing in-game: the interface is put back exactly as you left it.
-	 *
-	 * <p>Opening the log already does this automatically; the button is for re-reading it on demand.
-	 */
-	private void syncAllCollectionLog()
-	{
-		if (blockedByConsent())
-		{
-			return;
-		}
-		if (!config.syncCollectionLog())
-		{
-			panel.setStatus("Turn on \"Sync Collection Log\" in settings first.", false);
-			return;
-		}
-		clientThread.invoke(() ->
-		{
-			if (client.getGameState() != GameState.LOGGED_IN || !CollectionLog.isOpen(client))
-			{
-				panel.setStatus("Open your Collection Log in-game, then click Sync all.", false);
-				return;
-			}
-			if (CollectionLog.isOtherPlayers(client))
-			{
-				panel.setStatus("That's someone else's Collection Log - open your own.", false);
-				return;
-			}
-			// Ask the server for the whole log again. One request, no clicking through pages.
-			clogAll.clear();
-			clogRequested = true;
-			CollectionLog.requestFullLog(client);
-			refreshCollectionTotals();   // overall counts land immediately
-			panel.setStatus("Reading your Collection Log…", true);
-		});
-	}
-
 	/** POST any collection-log totals/pages changed since the last successful sync. Scheduler thread. */
 	private void syncCollectionLog()
 	{
@@ -1320,7 +1297,6 @@ public class RuneToolsPlugin extends Plugin
 						{
 							clogSentHash.putAll(sentHashes);   // don't re-send these unchanged pages
 						}
-						clogAllPending = false;
 					}
 					else
 					{
@@ -2473,6 +2449,10 @@ public class RuneToolsPlugin extends Plugin
 		if (e.getGroupId() == EQUIP_GROUP)
 		{
 			dpsButton = null;   // dynamic children are destroyed with the interface; allow a fresh add
+		}
+		else if (e.getGroupId() == CollectionLog.GROUP)
+		{
+			clogAskedThisOpen = false;
 		}
 	}
 

@@ -83,6 +83,19 @@ sent from the login screen.
   minutes, or as long as a `429`'s `Retry-After` asks, capped at an hour), and a key the server keeps
   rejecting stops the loop until you reconnect the character.
 
+## How the Collection Log is read
+
+The game only sends the client your full Collection Log on request, so when you open **your own**
+Collection Log in-game the plugin makes that request once: it fires the log's own *Search* toggle
+(`client.menuAction(-1, InterfaceID.Collection.SEARCH_TOGGLE, MenuAction.CC_OP, 1, -1, "Search", null)`)
+and puts the view straight back. This is the one use of `menuAction` that RuneLite's
+[Plugin Hub rules](https://github.com/runelite/runelite/wiki/Rejected-or-Rolled-Back-Features) list as
+acceptable ("fetching collection log data"). It only touches the interface (nothing happens in the
+game world), runs at most once each time you open the log, never runs for a log you are viewing in
+someone else's house, and only runs when **Sync Collection Log** is on, you have consented and the
+character is connected. Nothing else triggers it: there is no button or timer for it. Pages you
+then click through are read straight from the interface, which adds their names and quantities.
+
 ## Build & run (development)
 
 Requires a JDK 11+ and the RuneLite Gradle setup (this repo is generated from

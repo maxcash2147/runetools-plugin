@@ -241,7 +241,6 @@ class RuneToolsPanel extends PluginPanel
 	private final Runnable onRemoveTabs;
 	private final Consumer<String> onConvertTab;
 	private final Runnable onExportTag;
-	private Runnable onSyncAllClog = () -> { };
 	private volatile Runnable onOpened = () -> { };
 
 	private final JPanel bankSection = new JPanel();
@@ -299,10 +298,9 @@ class RuneToolsPanel extends PluginPanel
 				   Consumer<GearSetup> onUpdateFromGear, Consumer<GearSetup> onPush, LongConsumer onDelete,
 				   SlotEditor editor, Runnable onOpenHistory, Runnable onOrganizeBank, Runnable onRemoveTabs,
 				   Consumer<String> onConvertTab, Runnable onExportTag, Runnable onOpenSite, Runnable onCheckDps,
-				   Runnable onSyncAllClog, Consumer<GearSetup> onImportSetup)
+				   Consumer<GearSetup> onImportSetup)
 	{
 		this.onImportSetup = onImportSetup;
-		this.onSyncAllClog = onSyncAllClog;
 		this.onFilter = onFilter;
 		this.onClearFilter = onClearFilter;
 		this.itemManager = itemManager;
@@ -1671,17 +1669,18 @@ class RuneToolsPanel extends PluginPanel
 		clogHint.setAlignmentX(Component.LEFT_ALIGNMENT);
 		clogHint.setBorder(BorderFactory.createEmptyBorder(10, 0, 0, 0));
 
-		JButton syncAll = new JButton("Sync entire Collection Log");
-		syncAll.setToolTipText("<html>Open your Collection Log in-game first, then click this - it opens<br>"
-			+ "every page for you and syncs the whole log in one go (no more tab-by-tab).</html>");
-		syncAll.addActionListener(e -> onSyncAllClog.run());
-		syncAll.setAlignmentX(Component.LEFT_ALIGNMENT);
+		// How the whole log gets synced. There is deliberately no "sync now" button here: the read is
+		// only ever started by the player opening their Collection Log in-game.
+		JLabel howTo = new JLabel("<html>Open your Collection Log in-game to sync it: each time you open "
+			+ "it, the whole log is read in one go and sent to the site.</html>");
+		howTo.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		howTo.setAlignmentX(Component.LEFT_ALIGNMENT);
 
 		collectionSection.add(cap);
 		collectionSection.add(clogOverall);
 		collectionSection.add(clogOverallBar);
 		collectionSection.add(Box.createVerticalStrut(8));
-		collectionSection.add(syncAll);
+		collectionSection.add(howTo);
 		collectionSection.add(clogTabsPanel);
 		collectionSection.add(clogHint);
 		return collectionSection;
@@ -1720,8 +1719,8 @@ class RuneToolsPanel extends PluginPanel
 					clogTabsPanel.add(Box.createVerticalStrut(3));
 				}
 			}
-			clogHint.setText("<html>Synced " + syncedPages + " page" + (syncedPages == 1 ? "" : "s")
-				+ " on this account. Open more Collection Log pages in-game to fill in their items on "
+			clogHint.setText("<html>Page detail synced for " + syncedPages + " page" + (syncedPages == 1 ? "" : "s")
+				+ " on this account. Pages you open in-game add their names and exact quantities on "
 				+ "the site.</html>");
 			clogTabsPanel.revalidate();
 			clogTabsPanel.repaint();

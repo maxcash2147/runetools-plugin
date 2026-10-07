@@ -162,8 +162,10 @@ public interface RuneToolsConfig extends Config
 		keyName = "syncCollectionLog",
 		name = "Sync Collection Log",
 		description = "Sync your Collection Log to RuneTools for a browsable replica on the site. Overall "
-			+ "progress syncs immediately; opening the log reads the whole thing in one request, and the "
-			+ "pages you look at add their names and exact quantities.",
+			+ "progress syncs while you play. Each time you open your own Collection Log in-game, the "
+			+ "plugin asks the game once for the whole log (the same request the log's Search button "
+			+ "makes; nothing changes on screen), and the pages you look at add their names and exact "
+			+ "quantities. Only works once you have consented and connected this character.",
 		section = setupsSection,
 		position = 2
 	)

@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 import net.runelite.api.Client;
 import net.runelite.api.MenuAction;
+import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.game.ItemManager;
 
@@ -33,8 +34,6 @@ final class CollectionLog
 	static final int SETUP_SCRIPT = 7797;      // collection log interface setup
 	static final int TRANSMIT_SCRIPT = 4100;   // one obtained entry: args {?, itemId, quantity}
 	private static final int INIT_SCRIPT = 2240;
-	// InterfaceID.Collection.SEARCH_TOGGLE (packed group<<16|child = 621<<16|76).
-	private static final int SEARCH_TOGGLE = (GROUP << 16) | 76;
 	// VarbitID.COLLECTION_POH_HOST_BOOK_OPEN - 1 while viewing someone else's log via their POH.
 	static final int VB_POH_HOST_BOOK_OPEN = 12061;
 
@@ -194,13 +193,6 @@ final class CollectionLog
 
 	// -- whole-log capture: ask the SERVER for everything, once ----------------------------- //
 
-	/** True while the collection-log interface is open and drawn (its item panel has content). */
-	static boolean isOpen(Client client)
-	{
-		Widget c = client.getWidget(GROUP, ITEMS_CONTENTS);
-		return c != null && c.getDynamicChildren() != null;
-	}
-
 	/**
 	 * True when the open collection log belongs to SOMEONE ELSE - you are viewing it through a POH
 	 * Adventure Log. Their items must never be read: they would be uploaded under your account and
@@ -215,14 +207,24 @@ final class CollectionLog
 	/**
 	 * Ask the server to transmit the whole collection log. The "Search" op on the interface's search
 	 * toggle is what makes the server send every entry (each arrives as its own
-	 * {@link #TRANSMIT_SCRIPT} pre-fire); re-running the setup script then puts the interface back
-	 * how the player left it, so nothing is clicked and nothing visibly changes.
+	 * {@link #TRANSMIT_SCRIPT} pre-fire); re-running the interface's init script then puts the view
+	 * back how the player left it.
 	 *
-	 * <p>This is the approach used by the approved WikiSync and RuneProfile plugins. Client thread only.
+	 * <p>Why this is acceptable for a Plugin Hub plugin: RuneLite's "Rejected or Rolled Back
+	 * Features" wiki page lists {@code Client.menuAction} as a sensitive API and names exactly this
+	 * call, the collection log Search toggle, as its one acceptable use ("fetching collection log
+	 * data"). It is an interface-only op: it opens no other interface, moves nothing, and has no effect in the
+	 * game world. The plugin only makes it when the player has just opened their own Collection Log
+	 * themselves, at most once per opening, never for a log viewed in someone else's house, and only
+	 * when they have consented to syncing and connected this character. The init script is the log's
+	 * own UI script and sends nothing to the server.
+	 *
+	 * <p>The call is kept textually identical to RuneLite's published form so a reviewer can match
+	 * it at a glance. Client thread only.
 	 */
 	static void requestFullLog(Client client)
 	{
-		client.menuAction(-1, SEARCH_TOGGLE, MenuAction.CC_OP, 1, -1, "Search", null);
+		client.menuAction(-1, InterfaceID.Collection.SEARCH_TOGGLE, MenuAction.CC_OP, 1, -1, "Search", null);
 		client.runScript(INIT_SCRIPT);
 	}
 
