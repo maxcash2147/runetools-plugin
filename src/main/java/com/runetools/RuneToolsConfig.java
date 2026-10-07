@@ -65,9 +65,7 @@ public interface RuneToolsConfig extends Config
 			+ "server. When you save or "
 			+ "update a gear setup it also sends that setup's worn/equipped gear, inventory, rune pouch, "
 			+ "quiver and spellbook; when you open your Collection Log it sends your collection-log "
-			+ "progress and the items on the pages you view; if you also run the OSRS TCG plugin it sends "
-			+ "your TCG card collection (the card names and how many of each you own, foils included), your "
-			+ "credits, packs opened and collection stats; when you export a bank tab to share it, it "
+			+ "progress and the items on the pages you view; when you export a bank tab to share it, it "
 			+ "sends that tab's item layout to your runetools.com profile; only if you enable "
 			+ "\"Include bank\" it "
 			+ "sends your bank contents; and only if you run the Another Bronzeman Mode plugin with "
@@ -180,24 +178,11 @@ public interface RuneToolsConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "syncTcg",
-		name = "Sync OSRS TCG",
-		description = "If you also run the OSRS TCG plugin, sync your card collection, credits and packs "
-			+ "opened to RuneTools for the TCG hiscores and a collection page. Does nothing without that plugin.",
-		section = setupsSection,
-		position = 3
-	)
-	default boolean syncTcg()
-	{
-		return true;
-	}
-
-	@ConfigItem(
 		keyName = "setupFuzzyMatch",
 		name = "Fuzzy item matching",
 		description = "Match item variations (charged/uncharged, (i), recolours) when filtering the bank, so a banked variant of a setup item still shows.",
 		section = setupsSection,
-		position = 4
+		position = 3
 	)
 	default boolean setupFuzzyMatch()
 	{
@@ -209,7 +194,7 @@ public interface RuneToolsConfig extends Config
 		name = "Arrange bank to setup",
 		description = "Position bank items like the gear setup (equipment on the left, inventory on the right). Off = filter only.",
 		section = setupsSection,
-		position = 5
+		position = 4
 	)
 	default boolean setupBankLayout()
 	{

@@ -179,8 +179,6 @@ public class RuneToolsPlugin extends Plugin
 	private int questReadCountdown = -1;   // ticks until the once-per-login quest read; -1 = idle
 	private int questsHash;                // client thread only; last-sent quest states (skip identical re-reads)
 	private int slayerHash;                // client thread only; last-sent slayer state (skip identical re-reads)
-	private volatile int tcgEconHash;      // last-sent OSRS TCG economy hash (0 = resend on next check)
-	private volatile int tcgCardsHash;     // last-sent OSRS TCG card-collection hash (preserve-if-absent)
 	private volatile CombatAchievements.Snapshot lastCaSnapshot;
 	private volatile int[] caThresholds;
 	// Bronzeman: the logged-in username (captured on the client thread, used only as the legacy
@@ -376,10 +374,6 @@ public class RuneToolsPlugin extends Plugin
 		{
 			// Character context is gone; drop identity so we never attribute to the wrong RSN.
 			snapshot.updateAndGet(s -> s.toBuilder().rsn(null).build());
-			// Re-evaluate the OSRS TCG collection on next login: an account switch reads a different
-			// RS profile's state, so clear the change hashes to force one fresh upload after re-login.
-			tcgEconHash = 0;
-			tcgCardsHash = 0;
 			// Force a fresh Bronzeman read + sync after re-login (a switch reads a different profile file).
 			bronzemanHash = -1;
 			bronzemanUsername = null;
@@ -1016,10 +1010,6 @@ public class RuneToolsPlugin extends Plugin
 			refreshCollectionTotals();   // keep overall progress fresh even if the log isn't open
 			syncCollectionLog();
 		}
-		if (config.syncTcg())
-		{
-			syncTcg();
-		}
 	}
 
 	/**
@@ -1339,68 +1329,6 @@ public class RuneToolsPlugin extends Plugin
 			syncedPages = clogSentHash.size() + clogChanged.size();
 		}
 		panel.setCollectionLog(obtained, total, rows, syncedPages);
-	}
-
-	/**
-	 * Read the OSRS TCG collection (from that separate plugin's config) and push it for the site's TCG
-	 * hiscores + collection page. The economy fields (credits, packs, counts) re-send whenever they
-	 * change; the card list is preserve-if-absent - re-sent only when the collection itself changes. A
-	 * no-op when the TCG plugin isn't installed or has no state for this profile. Scheduler thread.
-	 */
-	private void syncTcg()
-	{
-		if (!snapshot.get().hasIdentity())
-		{
-			return;   // need the in-game RSN to attribute the collection on the hiscores
-		}
-		Tcg.Data d = Tcg.read(configManager);
-		if (d == null)
-		{
-			return;   // TCG plugin absent, nothing saved for this profile, or an unreadable/tampered blob
-		}
-		if (d.econHash == tcgEconHash && d.cardsHash == tcgCardsHash)
-		{
-			return;   // nothing changed since the last successful upload
-		}
-		final boolean sendCards = d.cardsHash != tcgCardsHash;
-		JsonObject body = d.economy;   // a fresh object from read() - safe to extend
-		stampIdentity(body);
-		if (sendCards)
-		{
-			body.add("cards", d.cards);
-		}
-		final int econHash = d.econHash;
-		final int cardsHash = d.cardsHash;
-		api.postTcg(body, new Callback()
-		{
-			@Override
-			public void onFailure(Call call, IOException ex)
-			{
-				noteSyncFailure();
-				log.debug("RuneTools: TCG sync failed (will retry): {}", ex.getMessage());
-			}
-
-			@Override
-			public void onResponse(Call call, Response resp)
-			{
-				try (Response r = resp)
-				{
-					noteSyncResult(r.code());
-					if (r.isSuccessful())
-					{
-						tcgEconHash = econHash;
-						if (sendCards)
-						{
-							tcgCardsHash = cardsHash;   // don't re-ship the card array until it changes again
-						}
-					}
-					else
-					{
-						log.debug("RuneTools: TCG sync HTTP {}", r.code());
-					}
-				}
-			}
-		});
 	}
 
 	/**
@@ -2121,7 +2049,7 @@ public class RuneToolsPlugin extends Plugin
 
 	/**
 	 * Stamp the logged-in character's identity (rsn + account_hash) onto a sync body. The site
-	 * publishes TCG, the collection log and combat achievements under the RSN, so it will only accept
+	 * publishes the collection log and combat achievements under the RSN, so it will only accept
 	 * a name this character has linked - the account hash is what proves the link on a first sync.
 	 */
 	private void stampIdentity(JsonObject body)

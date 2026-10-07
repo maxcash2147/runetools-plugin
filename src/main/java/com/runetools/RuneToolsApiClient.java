@@ -263,16 +263,6 @@ class RuneToolsApiClient
 			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
 	}
 
-	/**
-	 * Push the OSRS TCG collection for the TCG hiscores. Economy fields ride every changed send; the
-	 * {@code cards} array is preserve-if-absent (omitted = server keeps the last one).
-	 */
-	void postTcg(JsonObject body, Callback callback)
-	{
-		http.newCall(authed("/api/plugin/tcg")
-			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
-	}
-
 	/** Pull the user's bank layouts (incl. ones imported on the site). A matching {@code etag} -> 304. */
 	void getBankLayouts(String etag, Callback callback)
 	{
