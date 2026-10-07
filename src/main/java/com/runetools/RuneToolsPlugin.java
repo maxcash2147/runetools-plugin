@@ -52,7 +52,6 @@ import net.runelite.api.widgets.JavaScriptCallback;
 import net.runelite.api.widgets.Widget;
 import net.runelite.api.widgets.WidgetType;
 import net.runelite.api.widgets.WidgetUtil;
-import net.runelite.api.Quest;
 import net.runelite.api.Skill;
 import net.runelite.api.Varbits;
 import net.runelite.api.WorldType;
@@ -192,9 +191,6 @@ public class RuneToolsPlugin extends Plugin
 	private volatile boolean caCatalogSent;
 	private volatile int caCompletedHash;
 	private boolean caResyncPending;   // client thread only (set on chat, read on tick)
-	private int questReadCountdown = -1;   // ticks until the once-per-login quest read; -1 = idle
-	private int questsHash;                // client thread only; last-sent quest states (skip identical re-reads)
-	private int slayerHash;                // client thread only; last-sent slayer state (skip identical re-reads)
 	private volatile CombatAchievements.Snapshot lastCaSnapshot;
 	private volatile int[] caThresholds;
 
@@ -391,12 +387,6 @@ public class RuneToolsPlugin extends Plugin
 			// even the same one may have been reconnected on the site while we sat at the login screen.
 			resumeSync();
 		}
-		else if (e.getGameState() == GameState.LOGGED_IN)
-		{
-			// Quest states are read once per login, a little after the world settles (each read
-			// runs a clientscript, so we do the ~170 of them in one deferred pass, hash-guarded).
-			questReadCountdown = 15;
-		}
 	}
 
 	@Subscribe
@@ -423,114 +413,24 @@ public class RuneToolsPlugin extends Plugin
 		stateDirty.set(true);
 	}
 
-	/** Once-per-login quest read (client thread, via the onGameTick countdown). */
-	private void readQuests()
-	{
-		if (!config.syncState())
-		{
-			return;
-		}
-		JsonArray quests = new JsonArray();
-		int hash = 1;
-		for (Quest q : Quest.values())
-		{
-			String state;
-			try
-			{
-				state = q.getState(client).name().toLowerCase();
-			}
-			catch (RuntimeException ex)
-			{
-				continue;   // a single unreadable quest shouldn't kill the pass
-			}
-			JsonObject o = new JsonObject();
-			o.addProperty("id", q.getId());
-			o.addProperty("name", q.getName());
-			o.addProperty("state", state);
-			quests.add(o);
-			hash = hash * 31 + q.getId() * 7 + state.hashCode();
-		}
-		if (quests.size() > 0 && hash != questsHash)
-		{
-			questsHash = hash;
-			snapshot.updateAndGet(s -> s.toBuilder().quests(quests).build());
-			stateDirty.set(true);
-		}
-	}
-
 	/**
-	 * The Slayer task lives in a handful of varps/varbits (creature, amount, master, points, streak).
-	 * Re-read only when one of those actually changes so we're not rebuilding the snapshot on every
-	 * unrelated var change. Runs on the client thread (where var events fire).
+	 * Fail-safe: the moment the game says the open Collection Log belongs to the POH host, drop
+	 * anything captured while it was on screen. The capture paths check this too; this catches the
+	 * window between the interface opening and the varbit arriving. Client thread.
 	 */
 	@Subscribe
 	public void onVarbitChanged(VarbitChanged e)
 	{
-		// Fail-safe: the moment the game says the open Collection Log belongs to the POH host, drop
-		// anything captured while it was on screen. The capture paths check this too; this catches
-		// the window between the interface opening and the varbit arriving.
 		if (e.getVarbitId() == CollectionLog.VB_POH_HOST_BOOK_OPEN && CollectionLog.isOtherPlayers(client))
 		{
 			discardCollectionCapture();
 		}
-		if (!config.syncState())
-		{
-			return;
-		}
-		if (isWatched(e.getVarbitId(), Slayer.WATCH_VARBITS) || isWatched(e.getVarpId(), Slayer.WATCH_VARPS))
-		{
-			readSlayer();
-		}
-	}
-
-	private static boolean isWatched(int id, int[] ids)
-	{
-		if (id < 0)
-		{
-			return false;
-		}
-		for (int w : ids)
-		{
-			if (w == id)
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/** Rebuild the slayer state (client thread) and publish it if it changed. Skips when no active task. */
-	private void readSlayer()
-	{
-		if (!config.syncState())
-		{
-			return;
-		}
-		JsonObject slayer = Slayer.read(client);
-		if (slayer == null)
-		{
-			return;   // no active task; preserve-if-absent leaves the last one until a new one is assigned
-		}
-		int h = Slayer.hash(slayer);
-		if (h == slayerHash)
-		{
-			return;
-		}
-		slayerHash = h;
-		snapshot.updateAndGet(s -> s.toBuilder().slayer(slayer).build());
-		stateDirty.set(true);
 	}
 
 	@Subscribe
 	public void onGameTick(GameTick e)
 	{
 		updateIdentity();
-		if (questReadCountdown > 0 && --questReadCountdown == 0)
-		{
-			questReadCountdown = -1;
-			readQuests();
-			readSlayer();   // seed the current task at login; varbit changes keep it fresh after
-		}
 		// A CA-completion chat message fired: resync now (a tick later, so the completion varp has
 		// settled) instead of waiting for the 20s scheduler.
 		if (caResyncPending)
@@ -889,9 +789,8 @@ public class RuneToolsPlugin extends Plugin
 		boolean firstIdentity = snapshot.get().rsn == null;
 		long ah = client.getAccountHash();
 		final String hash = ah == -1 ? null : Long.toString(ah);
-		final int world = client.getWorld();
 		final boolean members = client.getWorldType().contains(WorldType.MEMBERS);
-		snapshot.updateAndGet(s -> s.toBuilder().rsn(name).accountHash(hash).world(world).members(members).build());
+		snapshot.updateAndGet(s -> s.toBuilder().rsn(name).accountHash(hash).members(members).build());
 		if (firstIdentity)
 		{
 			// Ensure at least one state upload after login even if nothing else changes.

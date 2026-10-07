@@ -50,20 +50,20 @@ which is also where a key is revoked.
 
 | Data | When | Why |
 |---|---|---|
+| RSN + account hash + a capture timestamp | with every sync | link the character to your site account |
 | Completed GE fills (item, buy/sell, qty, unit price, time) | as they fill | automatic P/L tracking |
-| RSN + account hash + a capture timestamp | on sync | link the character to your site account |
-| Coins, free GE slots, open GE offers, inventory, current world + members status | while playing | bankroll- and slot-aware flip suggestions |
-| Skill levels & experience | while playing | level-aware BIS / DPS / skill tools |
-| Quest progress | once per login | quest-gated gear/BIS filtering |
-| Combat Achievements (tasks + completion) | when they change | the site's CA planner |
-| Current Slayer task (creature, amount, assigning master, points, streak, task location) | when it changes | the site's Slayer optimizer |
-| Collection Log progress, your complete obtained set, and the items on pages you open | opening the log reads the whole log in one request; page detail as you open pages | a browsable collection-log replica |
+| Coins, free GE slots, open GE offers, inventory, members-world flag | when they change while playing | bankroll- and slot-aware flip suggestions |
+| Skill levels & experience | when they change while playing | level-aware calculators (BIS, DPS, skills), and proving the character is yours: the server compares the exact XP with the official hiscores before any synced data is shown publicly under that name |
+| Combat Achievements (task list + completion) | when they change | the site's CA planner |
+| Collection Log progress counts, your complete obtained set, and the items on pages you open | counts while playing; the obtained set when you open the log in-game | a browsable collection-log replica |
 | A gear setup's worn gear, inventory, rune pouch, quiver & spellbook | when you save or update that setup | two-way gear-setup sync |
 | A bank tab's item layout | only when you export a tab to share it | publish a shareable bank layout to your profile |
 | Bank contents | only if you enable **Include bank**, and only when you open the bank | holdings P/L, best-loadout-from-bank |
 
-Nothing is sent until you accept the consent toggle **and** connect the character. See the in-client
-warning for the authoritative description.
+That is the complete list: nothing else about the account, your client or other players is
+collected. Nothing is sent until you accept the consent toggle **and** connect the character, and
+each automatic sync can be switched off in the plugin settings. The in-client consent warning
+carries the same list.
 
 ## Build & run (development)
 
@@ -103,7 +103,7 @@ We follow the same pattern as RuneLite's built-in Grand Exchange plugin and Flip
 The website endpoints this plugin talks to live in the `ge-trader` repo:
 
 - `POST /api/plugin/trades` - ingest GE fills (JSON; reuses the trade table + dedup)
-- `POST /api/plugin/state` - latest-wins snapshot of gp / offers / holdings / skills / quests / slayer
+- `POST /api/plugin/state` - latest-wins snapshot of gp / offers / inventory / bank / skills
 - `POST /api/plugin/web-login` - mint the one-time browser-login code behind **Connect to
   RuneTools**, creating this character's account + key on first sight
 - `GET  /api/plugin/me` - validate a key, return linked RSNs (the connect flow uses web-login)

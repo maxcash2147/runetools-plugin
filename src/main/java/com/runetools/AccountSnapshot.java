@@ -8,13 +8,14 @@ import com.google.gson.JsonObject;
  * snapshot from the current one via {@link #toBuilder()} and publishes it with a single atomic
  * reference swap, so the sync thread always reads one internally-consistent set of fields - never a
  * torn mix such as a fresh inventory alongside a stale gp (gp is inventory coins + bank coins).
+ *
+ * <p>It holds only what the {@code /state} sync sends, and the server stores every field of it.
  */
 final class AccountSnapshot
 {
 	final String rsn;
 	final String accountHash;
-	final int world;
-	final boolean members;
+	final boolean members;     // logged into a members world
 	final long gp;
 	final int freeSlots;
 	final JsonArray offers;
@@ -22,15 +23,14 @@ final class AccountSnapshot
 	// null until the bank is captured (Include-bank on + bank opened this session), so a sync never
 	// uploads an empty bank that would overwrite a previously-synced one.
 	final JsonArray bank;
-	final JsonObject skills;   // null until captured; {skill: {level, xp}}
-	final JsonArray quests;    // null until captured; [{id, name, state}]
-	final JsonObject slayer;   // null until captured; {task?, task_id, amount, master_id, points, streak, ...}
+	// null until captured; {skill: {level, xp}}. Feeds the site's level-aware calculators, and the
+	// exact XP is how the server proves this account plays the in-game name it syncs under.
+	final JsonObject skills;
 
 	private AccountSnapshot(Builder b)
 	{
 		rsn = b.rsn;
 		accountHash = b.accountHash;
-		world = b.world;
 		members = b.members;
 		gp = b.gp;
 		freeSlots = b.freeSlots;
@@ -38,8 +38,6 @@ final class AccountSnapshot
 		inventory = b.inventory;
 		bank = b.bank;
 		skills = b.skills;
-		quests = b.quests;
-		slayer = b.slayer;
 	}
 
 	static AccountSnapshot empty()
@@ -61,7 +59,6 @@ final class AccountSnapshot
 	{
 		private String rsn;
 		private String accountHash;
-		private int world;
 		private boolean members;
 		private long gp;
 		private int freeSlots;
@@ -69,8 +66,6 @@ final class AccountSnapshot
 		private JsonArray inventory = new JsonArray();
 		private JsonArray bank;
 		private JsonObject skills;
-		private JsonArray quests;
-		private JsonObject slayer;
 
 		private Builder()
 		{
@@ -80,7 +75,6 @@ final class AccountSnapshot
 		{
 			rsn = s.rsn;
 			accountHash = s.accountHash;
-			world = s.world;
 			members = s.members;
 			gp = s.gp;
 			freeSlots = s.freeSlots;
@@ -88,8 +82,6 @@ final class AccountSnapshot
 			inventory = s.inventory;
 			bank = s.bank;
 			skills = s.skills;
-			quests = s.quests;
-			slayer = s.slayer;
 		}
 
 		Builder rsn(String v)
@@ -101,12 +93,6 @@ final class AccountSnapshot
 		Builder accountHash(String v)
 		{
 			accountHash = v;
-			return this;
-		}
-
-		Builder world(int v)
-		{
-			world = v;
 			return this;
 		}
 
@@ -149,18 +135,6 @@ final class AccountSnapshot
 		Builder skills(JsonObject v)
 		{
 			skills = v;
-			return this;
-		}
-
-		Builder quests(JsonArray v)
-		{
-			quests = v;
-			return this;
-		}
-
-		Builder slayer(JsonObject v)
-		{
-			slayer = v;
 			return this;
 		}
 

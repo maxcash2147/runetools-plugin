@@ -277,6 +277,9 @@ class RuneToolsApiClient
 	/**
 	 * The {@code /state} body for a snapshot, without the capture timestamp ({@code ts}): that differs
 	 * on every send, and leaving it to the caller lets two sends of the same state be compared.
+	 *
+	 * <p>Every field here is one the server stores; anything it would only throw away is not sent.
+	 * Keep this in step with the README's "What it sends" table and the consent text.
 	 */
 	static JsonObject stateBody(AccountSnapshot s)
 	{
@@ -286,7 +289,6 @@ class RuneToolsApiClient
 		{
 			body.addProperty("account_hash", s.accountHash);
 		}
-		body.addProperty("world", s.world);
 		body.addProperty("members", s.members);
 		body.addProperty("gp", s.gp);
 		body.addProperty("free_slots", s.freeSlots);
@@ -297,18 +299,10 @@ class RuneToolsApiClient
 		{
 			body.add("bank", s.bank);
 		}
-		// Same preserve-if-absent contract for skills, quests and slayer.
+		// Same preserve-if-absent contract for skills.
 		if (s.skills != null)
 		{
 			body.add("skills", s.skills);
-		}
-		if (s.quests != null)
-		{
-			body.add("quests", s.quests);
-		}
-		if (s.slayer != null)
-		{
-			body.add("slayer", s.slayer);
 		}
 		return body;
 	}

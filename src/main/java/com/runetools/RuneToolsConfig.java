@@ -55,25 +55,33 @@ public interface RuneToolsConfig extends Config
 		keyName = "consent",
 		name = "I consent to sending my account data to RuneTools",
 		description = "The plugin sends nothing until this is enabled.",
-		warning = "This plugin sends your account name (RSN), account hash, coin balance (which "
-			+ "includes banked coins once you have opened your bank), number of free Grand Exchange "
-			+ "slots, completed Grand Exchange trades, open GE offers, inventory, skill levels and "
-			+ "experience, quest progress, Combat Achievements progress, your current Slayer task (its "
-			+ "creature, amount remaining and originally assigned, assigning master, reward points, "
-			+ "streak and task location), a capture "
-			+ "timestamp, and your current world number and members-world status to the RuneTools "
-			+ "server. When you save or "
-			+ "update a gear setup it also sends that setup's worn/equipped gear, inventory, rune pouch, "
-			+ "quiver and spellbook; when you open your Collection Log it sends your collection-log "
-			+ "progress and the items on the pages you view; when you export a bank tab to share it, it "
-			+ "sends that tab's item layout to your runetools.com profile; only if you enable "
-			+ "\"Include bank\" it sends your bank contents. "
+		// Keep this in step with what the plugin actually sends (RuneToolsApiClient) and with the
+		// README's "What it sends" table.
+		warning = "Once enabled, and once you connect a character, this plugin sends the following "
+			+ "to the RuneTools server:\n"
+			+ "- Your character name (RSN), account hash and a capture time, to link the character to "
+			+ "your RuneTools account.\n"
+			+ "- Completed Grand Exchange trades (item, buy or sell, quantity, price, time), for "
+			+ "profit tracking.\n"
+			+ "- Your coins (including banked coins once you open your bank), free GE slots, open GE "
+			+ "offers, inventory and whether you are on a members world, for flip suggestions that "
+			+ "fit your bankroll.\n"
+			+ "- Your skill levels and experience, for level-aware calculators and to prove the "
+			+ "character is yours (the site checks it against the official hiscores).\n"
+			+ "- Your Combat Achievements (the task list and which tasks you have completed), for the "
+			+ "site's planner.\n"
+			+ "- Your Collection Log progress counts, and the items you have obtained when you open "
+			+ "the log in-game, for a browsable copy of your log on the site.\n"
+			+ "- A gear setup's worn gear, inventory, rune pouch, quiver and spellbook, when you save "
+			+ "or update that setup.\n"
+			+ "- A bank tab's item layout, only when you export it to share it.\n"
+			+ "- Your bank contents, only if you turn on \"Include bank\".\n"
+			+ "Each of these can be switched off under \"What to sync\" and \"Gear setups\".\n"
 			// The Plugin Hub requires this sentence, near enough verbatim, on any config item that
 			// turns on a third-party-server feature. Without it the plugin fails review.
 			+ "This feature submits your IP address to a 3rd-party server not controlled or verified "
-			+ "by RuneLite developers. Your API "
-			+ "key is stored locally and sent only to that server over HTTPS. Enable only if you accept "
-			+ "this.",
+			+ "by RuneLite developers. Your API key is stored locally and sent only to that server "
+			+ "over HTTPS. Enable only if you accept this.",
 		section = connectionSection,
 		position = 2
 	)
@@ -97,7 +105,8 @@ public interface RuneToolsConfig extends Config
 	@ConfigItem(
 		keyName = "syncState",
 		name = "Sync account state",
-		description = "Upload coins, open GE offers and inventory so flip suggestions fit your real bankroll and free slots.",
+		description = "Upload coins, open GE offers and inventory so flip suggestions fit your real bankroll and free slots, "
+			+ "plus your skill levels and experience for level-aware calculators and to prove the character is yours.",
 		section = syncSection,
 		position = 1
 	)
