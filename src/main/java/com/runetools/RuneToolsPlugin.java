@@ -36,35 +36,35 @@ import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
+import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOffer;
-import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.api.GrandExchangeOfferState;
-import net.runelite.api.InventoryID;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.Player;
 import net.runelite.api.ScriptID;
+import net.runelite.api.Skill;
+import net.runelite.api.WorldType;
+import net.runelite.api.events.ChatMessage;
+import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
+import net.runelite.api.events.GrandExchangeOfferChanged;
+import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.ScriptPostFired;
 import net.runelite.api.events.ScriptPreFired;
+import net.runelite.api.events.StatChanged;
+import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.gameval.InventoryID;
+import net.runelite.api.gameval.SpriteID;
+import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.JavaScriptCallback;
 import net.runelite.api.widgets.Widget;
 import net.runelite.api.widgets.WidgetType;
 import net.runelite.api.widgets.WidgetUtil;
-import net.runelite.api.Skill;
-import net.runelite.api.Varbits;
-import net.runelite.api.WorldType;
-import net.runelite.api.events.ChatMessage;
-import net.runelite.api.events.GameStateChanged;
-import net.runelite.api.events.ScriptPostFired;
-import net.runelite.api.events.StatChanged;
-import net.runelite.api.events.VarbitChanged;
-import net.runelite.api.events.GameTick;
-import net.runelite.api.events.GrandExchangeOfferChanged;
-import net.runelite.api.events.ItemContainerChanged;
-import net.runelite.api.gameval.SpriteID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -257,7 +257,7 @@ public class RuneToolsPlugin extends Plugin
 		{
 			clientThread.invoke(() ->
 			{
-				int id = itemAt(client.getItemContainer(InventoryID.EQUIPMENT), equipIdx);
+				int id = itemAt(client.getItemContainer(InventoryID.WORN), equipIdx);
 				SwingUtilities.invokeLater(() -> onItem.accept(id));
 			});
 		}
@@ -267,7 +267,7 @@ public class RuneToolsPlugin extends Plugin
 		{
 			clientThread.invoke(() ->
 			{
-				int id = itemAt(client.getItemContainer(InventoryID.INVENTORY), index);
+				int id = itemAt(client.getItemContainer(InventoryID.INV), index);
 				SwingUtilities.invokeLater(() -> onItem.accept(id));
 			});
 		}
@@ -429,7 +429,9 @@ public class RuneToolsPlugin extends Plugin
 		JsonObject skills = new JsonObject();
 		for (Skill sk : Skill.values())
 		{
-			if (sk == Skill.OVERALL)
+			// Skip the total: Skill.OVERALL is deprecated (it isn't a real skill), so it's matched by
+			// name, which also keeps compiling once the constant is gone.
+			if ("Overall".equals(sk.getName()))
 			{
 				continue;
 			}
@@ -736,7 +738,7 @@ public class RuneToolsPlugin extends Plugin
 		{
 			return;
 		}
-		if (e.getContainerId() == InventoryID.INVENTORY.getId())
+		if (e.getContainerId() == InventoryID.INV)
 		{
 			inventoryCoins = c.count(COINS_ITEM_ID);
 			final JsonArray inv = itemsToArray(c);
@@ -749,7 +751,7 @@ public class RuneToolsPlugin extends Plugin
 			snapshot.updateAndGet(s -> s.toBuilder().inventory(inv).gp(gp).build());
 			stateDirty.set(true);
 		}
-		else if (e.getContainerId() == InventoryID.BANK.getId())
+		else if (e.getContainerId() == InventoryID.BANK)
 		{
 			bankCoins = c.count(COINS_ITEM_ID);
 			final JsonArray bank = config.syncBank() ? itemsToArray(c) : null;
@@ -862,7 +864,7 @@ public class RuneToolsPlugin extends Plugin
 
 	private void recomputeGpAndOffers()
 	{
-		ItemContainer inv = client.getItemContainer(InventoryID.INVENTORY);
+		ItemContainer inv = client.getItemContainer(InventoryID.INV);
 		final JsonArray invArr = inv != null ? itemsToArray(inv) : null;
 		if (inv != null)
 		{
@@ -1720,7 +1722,7 @@ public class RuneToolsPlugin extends Plugin
 			ItemContainer bank = client.getItemContainer(InventoryID.BANK);
 			Set<Integer> owned = new HashSet<>();
 			for (ItemContainer c : new ItemContainer[]{bank,
-				client.getItemContainer(InventoryID.INVENTORY), client.getItemContainer(InventoryID.EQUIPMENT)})
+				client.getItemContainer(InventoryID.INV), client.getItemContainer(InventoryID.WORN)})
 			{
 				if (c == null)
 				{
@@ -1791,9 +1793,9 @@ public class RuneToolsPlugin extends Plugin
 	}
 
 	private static final int[] BANK_TAB_COUNTS = {
-		Varbits.BANK_TAB_ONE_COUNT, Varbits.BANK_TAB_TWO_COUNT, Varbits.BANK_TAB_THREE_COUNT,
-		Varbits.BANK_TAB_FOUR_COUNT, Varbits.BANK_TAB_FIVE_COUNT, Varbits.BANK_TAB_SIX_COUNT,
-		Varbits.BANK_TAB_SEVEN_COUNT, Varbits.BANK_TAB_EIGHT_COUNT, Varbits.BANK_TAB_NINE_COUNT,
+		VarbitID.BANK_TAB_1, VarbitID.BANK_TAB_2, VarbitID.BANK_TAB_3,
+		VarbitID.BANK_TAB_4, VarbitID.BANK_TAB_5, VarbitID.BANK_TAB_6,
+		VarbitID.BANK_TAB_7, VarbitID.BANK_TAB_8, VarbitID.BANK_TAB_9,
 	};
 
 	/**
@@ -1811,7 +1813,7 @@ public class RuneToolsPlugin extends Plugin
 				panel.setBankStatus("Open your bank first.", false);
 				return;
 			}
-			int tab = client.getVarbitValue(Varbits.CURRENT_BANK_TAB);
+			int tab = client.getVarbitValue(VarbitID.BANK_CURRENTTAB);
 			if (tab < 1 || tab > BANK_TAB_COUNTS.length)
 			{
 				panel.setBankStatus("Open a numbered bank tab (1-9) first, then convert.", false);
@@ -2534,7 +2536,7 @@ public class RuneToolsPlugin extends Plugin
 				panel.setStatus("Log into the game first, then check DPS.", false);
 				return;
 			}
-			ItemContainer eq = client.getItemContainer(InventoryID.EQUIPMENT);
+			ItemContainer eq = client.getItemContainer(InventoryID.WORN);
 			if (eq == null)
 			{
 				panel.setStatus("Equip some gear first, then check DPS.", false);
