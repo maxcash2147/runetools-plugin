@@ -25,9 +25,6 @@ final class AccountSnapshot
 	final JsonObject skills;   // null until captured; {skill: {level, xp}}
 	final JsonArray quests;    // null until captured; [{id, name, state}]
 	final JsonObject slayer;   // null until captured; {task?, task_id, amount, master_id, points, streak, ...}
-	// Item ids unlocked in the Another Bronzeman Mode plugin (read from its per-profile file). null
-	// until captured / when the feature is off, so a sync never overwrites a previously-synced set.
-	final JsonArray bronzeman;
 
 	private AccountSnapshot(Builder b)
 	{
@@ -43,7 +40,6 @@ final class AccountSnapshot
 		skills = b.skills;
 		quests = b.quests;
 		slayer = b.slayer;
-		bronzeman = b.bronzeman;
 	}
 
 	static AccountSnapshot empty()
@@ -75,7 +71,6 @@ final class AccountSnapshot
 		private JsonObject skills;
 		private JsonArray quests;
 		private JsonObject slayer;
-		private JsonArray bronzeman;
 
 		private Builder()
 		{
@@ -95,7 +90,6 @@ final class AccountSnapshot
 			skills = s.skills;
 			quests = s.quests;
 			slayer = s.slayer;
-			bronzeman = s.bronzeman;
 		}
 
 		Builder rsn(String v)
@@ -167,12 +161,6 @@ final class AccountSnapshot
 		Builder slayer(JsonObject v)
 		{
 			slayer = v;
-			return this;
-		}
-
-		Builder bronzeman(JsonArray v)
-		{
-			bronzeman = v;
 			return this;
 		}
 

@@ -197,11 +197,6 @@ public class RuneToolsPlugin extends Plugin
 	private int slayerHash;                // client thread only; last-sent slayer state (skip identical re-reads)
 	private volatile CombatAchievements.Snapshot lastCaSnapshot;
 	private volatile int[] caThresholds;
-	// Bronzeman: the logged-in username (captured on the client thread, used only as the legacy
-	// profile-key fallback for the unlocks file), and the last-published unlocks hash so a NEW unlock
-	// re-marks the state dirty even when nothing else changed. -1 = "not yet read this session".
-	private volatile String bronzemanUsername;
-	private volatile int bronzemanHash = -1;
 
 	// Collection Log: obtained data is read from the interface as pages are opened; overall counts
 	// come from varps. All maps are guarded by clogLock (client thread queues, scheduler thread sends).
@@ -390,9 +385,6 @@ public class RuneToolsPlugin extends Plugin
 		{
 			// Character context is gone; drop identity so we never attribute to the wrong RSN.
 			snapshot.updateAndGet(s -> s.toBuilder().rsn(null).build());
-			// Force a fresh Bronzeman read + sync after re-login (a switch reads a different profile file).
-			bronzemanHash = -1;
-			bronzemanUsername = null;
 			// Drop any half-read Collection Log: the next character's log must never inherit it.
 			discardCollectionCapture();
 			// Whoever logs in next gets a clean slate: a different character has a different key, and
@@ -895,9 +887,6 @@ public class RuneToolsPlugin extends Plugin
 			return;
 		}
 		boolean firstIdentity = snapshot.get().rsn == null;
-		// Capture the login username on the client thread; it's only the legacy fallback key for the
-		// Bronzeman unlocks file (used when getRSProfileKey() is null). The file read itself is off-thread.
-		bronzemanUsername = client.getUsername();
 		long ah = client.getAccountHash();
 		final String hash = ah == -1 ? null : Long.toString(ah);
 		final int world = client.getWorld();
@@ -2318,8 +2307,6 @@ public class RuneToolsPlugin extends Plugin
 		{
 			return;
 		}
-		// Refresh Bronzeman unlocks FIRST so a new unlock (with no other change) still flips stateDirty.
-		refreshBronzeman();
 		if (!stateDirty.get())
 		{
 			return;
@@ -2378,32 +2365,6 @@ public class RuneToolsPlugin extends Plugin
 				}
 			}
 		});
-	}
-
-	/**
-	 * Read the Another Bronzeman Mode unlocks for the current profile (off the client thread - it's a
-	 * plain file read) and publish them into the snapshot when the set changed, flipping stateDirty so a
-	 * new unlock triggers a re-sync even with no bank/inventory change. When the toggle is off we leave
-	 * the field null so the server keeps the last synced set (preserve-if-absent), and we reset the hash
-	 * so turning it back on re-publishes. Consent + syncState are already enforced by the caller.
-	 */
-	private void refreshBronzeman()
-	{
-		if (!config.syncBronzeman())
-		{
-			bronzemanHash = -1;   // re-publish on the next read after the toggle is turned back on
-			return;
-		}
-		List<Integer> ids = Bronzeman.readUnlocks(configManager, bronzemanUsername);
-		int h = Bronzeman.hash(ids);
-		if (h == bronzemanHash)
-		{
-			return;   // no change since the last publish
-		}
-		bronzemanHash = h;
-		final JsonArray arr = Bronzeman.toJsonArray(ids);   // null when the set is empty
-		snapshot.updateAndGet(s -> s.toBuilder().bronzeman(arr != null ? arr : s.bronzeman).build());
-		stateDirty.set(true);
 	}
 
 	// -- panel + connection test --------------------------------------------- //

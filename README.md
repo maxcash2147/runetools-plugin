@@ -58,7 +58,6 @@ which is also where a key is revoked.
 | Combat Achievements (tasks + completion) | when they change | the site's CA planner |
 | Current Slayer task (creature, amount, assigning master, points, streak, task location) | when it changes | the site's Slayer optimizer |
 | Collection Log progress, your complete obtained set, and the items on pages you open | opening the log reads the whole log in one request; page detail as you open pages | a browsable collection-log replica |
-| Bronzeman unlocks (the item ids you have unlocked there) | while playing, if you run the [Another Bronzeman Mode](https://github.com/dennisdev/another-bronzeman-mode) plugin and leave **Include Bronzeman unlocks** on | count unlocked items as gear you own for BIS |
 | A gear setup's worn gear, inventory, rune pouch, quiver & spellbook | when you save or update that setup | two-way gear-setup sync |
 | A bank tab's item layout | only when you export a tab to share it | publish a shareable bank layout to your profile |
 | Bank contents | only if you enable **Include bank**, and only when you open the bank | holdings P/L, best-loadout-from-bank |

@@ -310,12 +310,6 @@ class RuneToolsApiClient
 		{
 			body.add("slayer", s.slayer);
 		}
-		// Bronzeman unlock ids: preserve-if-absent, same as bank. Only present when the toggle + consent
-		// are on and the Another Bronzeman Mode plugin's unlocks file exists for this profile.
-		if (s.bronzeman != null)
-		{
-			body.add("bronzeman", s.bronzeman);
-		}
 		return body;
 	}
 

@@ -67,9 +67,7 @@ public interface RuneToolsConfig extends Config
 			+ "quiver and spellbook; when you open your Collection Log it sends your collection-log "
 			+ "progress and the items on the pages you view; when you export a bank tab to share it, it "
 			+ "sends that tab's item layout to your runetools.com profile; only if you enable "
-			+ "\"Include bank\" it "
-			+ "sends your bank contents; and only if you run the Another Bronzeman Mode plugin with "
-			+ "\"Include Bronzeman unlocks\" on, it sends the list of item ids you have unlocked there. "
+			+ "\"Include bank\" it sends your bank contents. "
 			// The Plugin Hub requires this sentence, near enough verbatim, on any config item that
 			// turns on a third-party-server feature. Without it the plugin fails review.
 			+ "This feature submits your IP address to a 3rd-party server not controlled or verified "
@@ -135,18 +133,6 @@ public interface RuneToolsConfig extends Config
 		position = 0
 	)
 	default boolean syncSetups()
-	{
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "syncBronzeman",
-		name = "Include Bronzeman unlocks",
-		description = "Also count items you've unlocked in the Another Bronzeman Mode plugin when RuneTools computes best-in-slot from your owned gear.",
-		section = syncSection,
-		position = 3
-	)
-	default boolean syncBronzeman()
 	{
 		return true;
 	}
