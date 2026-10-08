@@ -351,6 +351,7 @@ public class RuneToolsPlugin extends Plugin
 		// dynamic children (and resets the nudged native buttons) when it's next reopened. We avoid
 		// deleteAllChildren() here so we never wipe the Wiki plugin's own button off the shared parent.
 		dpsButton = null;
+		pairing.set(null);   // a pending pairing dies with the plugin; Connect starts a fresh one
 		clientToolbar.removeNavigation(navButton);
 		savePending();
 		// Drop any captured Collection Log. While the plugin is disabled the event bus is
@@ -2360,7 +2361,26 @@ public class RuneToolsPlugin extends Plugin
 					{
 						if (r.code() == 403)
 						{
-							panel.setStatus("This account is secured - sign in with your email on the site.", false);
+							String why = "";
+							try
+							{
+								why = str(new JsonParser().parse(RuneToolsApiClient.readBoundedBody(r)).getAsJsonObject(), "code", "");
+							}
+							catch (Exception ignored)
+							{
+								// not JSON: treat it like the old answer
+							}
+							if ("email_locked".equals(why))
+							{
+								// No working key for an account secured with an email: pair this client.
+								startPairing(accountHash, rsn);
+							}
+							else
+							{
+								// Already connected; a browser session for an email account needs the email.
+								panel.setStatus("This account is secured - sign in with your email on the site.", false);
+								SwingUtilities.invokeLater(() -> LinkBrowser.browse(api.base() + "/"));
+							}
 							return;
 						}
 						if (!r.isSuccessful())
@@ -2398,6 +2418,147 @@ public class RuneToolsPlugin extends Plugin
 					}
 				}
 			});
+		});
+	}
+
+	// -- pairing (a client joining an account secured with an email) -------- //
+
+	/** One pending pairing: what to poll with, the code the player checks, and its deadline. */
+	private static final class Pairing
+	{
+		final String pollToken;
+		final String userCode;
+		final String accountHash;
+		final String rsn;
+		final long expiresAtMillis;
+		final AtomicBoolean inFlight = new AtomicBoolean();
+
+		Pairing(String pollToken, String userCode, String accountHash, String rsn, long expiresAtMillis)
+		{
+			this.pollToken = pollToken;
+			this.userCode = userCode;
+			this.accountHash = accountHash;
+			this.rsn = rsn;
+			this.expiresAtMillis = expiresAtMillis;
+		}
+	}
+
+	private final AtomicReference<Pairing> pairing = new AtomicReference<>();
+
+	/**
+	 * Ask the site to pair this client, show the code, and open the approve page. The player signs
+	 * in there (with the account's email), checks the code matches and approves; {@link #pollPairing}
+	 * then receives this character's key.
+	 */
+	private void startPairing(String accountHash, String rsn)
+	{
+		panel.setStatus("This account is secured with an email - opening the site to approve this client…", true);
+		api.pairStart(accountHash, rsn, new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				panel.setStatus("Couldn't reach the site - are you online?", false);
+			}
+
+			@Override
+			public void onResponse(Call call, Response resp)
+			{
+				try (Response r = resp)
+				{
+					if (!r.isSuccessful())
+					{
+						panel.setStatus("Couldn't start connecting (HTTP " + r.code() + "). Try again shortly.", false);
+						return;
+					}
+					JsonObject o = new JsonParser().parse(RuneToolsApiClient.readBoundedBody(r)).getAsJsonObject();
+					String token = str(o, "poll_token", null);
+					String code = str(o, "user_code", null);
+					String url = str(o, "url", null);
+					long ttl = o.has("expires_in") ? o.get("expires_in").getAsLong() : 600L;
+					if (token == null || code == null)
+					{
+						panel.setStatus("Unexpected response from the site.", false);
+						return;
+					}
+					pairing.set(new Pairing(token, code, accountHash, rsn, System.currentTimeMillis() + ttl * 1000L));
+					panel.setStatus("Approve this client on the site. Your code: " + code, true);
+					// Only ever open a page on our own (configured) server.
+					final String full = url != null ? api.base() + url : null;
+					if (full != null && isSafeShareUrl(full))
+					{
+						SwingUtilities.invokeLater(() -> LinkBrowser.browse(full));
+					}
+				}
+				catch (Exception ex)
+				{
+					panel.setStatus("Unexpected response from the site.", false);
+				}
+			}
+		});
+	}
+
+	/** While a pairing is pending, ask every few seconds whether the player has approved it. */
+	@Schedule(period = 3, unit = ChronoUnit.SECONDS, asynchronous = true)
+	public void pollPairing()
+	{
+		final Pairing p = pairing.get();
+		if (p == null)
+		{
+			return;
+		}
+		if (System.currentTimeMillis() > p.expiresAtMillis)
+		{
+			pairing.compareAndSet(p, null);
+			panel.setStatus("The connection request expired - click Connect to try again.", false);
+			return;
+		}
+		if (!p.inFlight.compareAndSet(false, true))
+		{
+			return;   // the last poll hasn't answered yet
+		}
+		api.pairPoll(p.pollToken, new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				p.inFlight.set(false);   // a network blip: the next tick asks again
+			}
+
+			@Override
+			public void onResponse(Call call, Response resp)
+			{
+				try (Response r = resp)
+				{
+					if (r.code() == 410)
+					{
+						pairing.compareAndSet(p, null);
+						panel.setStatus("The connection request expired - click Connect to try again.", false);
+						return;
+					}
+					if (!r.isSuccessful())
+					{
+						return;   // a 429 or a server hiccup: keep the pairing, ask again next tick
+					}
+					JsonObject o = new JsonParser().parse(RuneToolsApiClient.readBoundedBody(r)).getAsJsonObject();
+					String key = str(o, "api_key", null);
+					if ("approved".equals(str(o, "status", "")) && key != null && key.startsWith("rtk_"))
+					{
+						pairing.compareAndSet(p, null);
+						storeKeyForHash(p.accountHash, key);
+						updatePanelStatic();   // "Connected as ..."
+						panel.setStatus("Connected" + (p.rsn != null ? " as " + p.rsn : "") + ".", true);
+					}
+				}
+				catch (Exception ex)
+				{
+					log.debug("RuneTools: pairing poll failed", ex);
+				}
+				finally
+				{
+					p.inFlight.set(false);
+				}
+			}
 		});
 	}
 

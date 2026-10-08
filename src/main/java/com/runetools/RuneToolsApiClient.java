@@ -154,6 +154,14 @@ class RuneToolsApiClient
 		return r.peekBody(MAX_RESPONSE_BYTES).string();
 	}
 
+	/** A request that carries no key (pairing is how a client without a working key gets one). */
+	private Request.Builder plain(String path)
+	{
+		return new Request.Builder()
+			.url(base() + path)
+			.header("Accept", "application/json");
+	}
+
 	private Request.Builder authed(String path)
 	{
 		return new Request.Builder()
@@ -177,6 +185,36 @@ class RuneToolsApiClient
 		}
 		body.addProperty("rsn", rsn);
 		http.newCall(authed("/api/plugin/web-login")
+			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
+	}
+
+	/**
+	 * Start pairing this client with an account it can't enter on its own (one secured with an
+	 * email, which web-login refuses). Response:
+	 * {@code {poll_token, user_code, url, expires_in, interval}}; the player approves user_code at
+	 * <site>{url} while signed in, and {@link #pairPoll} then hands back this client's key.
+	 */
+	void pairStart(String accountHash, String rsn, Callback callback)
+	{
+		JsonObject body = new JsonObject();
+		if (accountHash != null)
+		{
+			body.addProperty("account_hash", accountHash);
+		}
+		body.addProperty("rsn", rsn);
+		http.newCall(plain("/api/plugin/pair")
+			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
+	}
+
+	/**
+	 * Poll a pairing: {@code {status: "pending"}} until the player approves it, then once
+	 * {@code {status: "approved", api_key}}; HTTP 410 once it expired or was used.
+	 */
+	void pairPoll(String pollToken, Callback callback)
+	{
+		JsonObject body = new JsonObject();
+		body.addProperty("poll_token", pollToken);
+		http.newCall(plain("/api/plugin/pair/poll")
 			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
 	}
 

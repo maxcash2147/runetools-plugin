@@ -41,8 +41,10 @@ jump to the site signed in as that character.
 
 Every character links itself, and each one gets its own key and its own RuneTools account, so a main
 and an ironman never land in one profile. Add an email on the site if you also want to sign in from
-a browser; once you do the account is email-locked, and the plugin says so instead of bootstrapping
-a new one.
+a browser. Once you do, the account is email-locked: a key alone no longer opens it, so when this
+client has no working key, **Connect to RuneTools** shows a short code and opens the site, where you
+sign in with that email and approve the matching code; the plugin then picks up its key on its own.
+A password reset signs every client out, and they reconnect the same way.
 
 If the server ever rejects a stored key the status line says so and the button reverts to **Connect
 to RuneTools** - clicking it re-links the character and mints a working key.
@@ -152,6 +154,7 @@ These are every request the plugin makes, all to the configured server:
 
 - `POST /api/plugin/web-login` - mint the one-time browser-login code behind **Connect to
   RuneTools**, creating this character's account + key on first sight
+- `POST /api/plugin/pair`, then `POST /api/plugin/pair/poll` every few seconds - pair this client with an email-locked account (only while you're connecting one)
 - `POST /api/plugin/trades` - completed GE fills (the server dedupes on `ext_id`)
 - `POST /api/plugin/state` - latest-wins snapshot of gp / offers / inventory / bank / skills
 - `GET /api/plugin/setups` (ETag) · `POST` · `PUT /{id}` · `DELETE /{id}` - two-way gear-setup sync
