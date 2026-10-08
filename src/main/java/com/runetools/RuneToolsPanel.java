@@ -344,7 +344,7 @@ class RuneToolsPanel extends PluginPanel
 
 		signIn = flatButton("Open RuneTools  ↗");
 		signIn.setToolTipText("<html>Open runetools.com signed in as this character.<br>"
-			+ "First time: it creates your account automatically - add an email later to log in from a browser.</html>");
+			+ "First time: approve it in your browser - sign in, create an account, or continue without an email.</html>");
 		signIn.addActionListener(e -> onOpenSite.run());
 
 		JButton dps = flatButton("Check RuneTools DPS");

@@ -32,22 +32,21 @@ of what it sends, and why, is under [What it sends](#what-it-sends).
    this is on.
 2. Log into the game, open the **RuneTools** side panel and click **Connect to RuneTools**.
 
-That click is the whole flow. The plugin asks the server for a one-time browser-login code, sending
-this character's name and account hash; on first sight the server creates your site account from
-that account hash, names it after your in-game name and hands back an API key, which the plugin
-stores for this character. Your browser then opens runetools.com already signed in, the panel reads
-*“Connected as <you>”*, and the button becomes **Open RuneTools** - press it whenever you want to
-jump to the site signed in as that character.
+That opens the site's approve page with a short code, which the panel shows too. Check the two match,
+then either connect the character to the RuneTools account you're signed into, sign in or create one,
+or continue without an email (an account the plugin opens; you can add an email any time). The plugin
+picks up this character's key by itself a few seconds later, the panel reads *“Connected as <you>”*, and
+the button becomes **Open RuneTools** - press it to jump to the site signed in (for an account with an
+email, sign in with that).
 
-Every character links itself, and each one gets its own key and its own RuneTools account, so a main
-and an ironman never land in one profile. Add an email on the site if you also want to sign in from
-a browser. Once you do, the account is email-locked: a key alone no longer opens it, so when this
-client has no working key, **Connect to RuneTools** shows a short code and opens the site, where you
-sign in with that email and approve the matching code; the plugin then picks up its key on its own.
-A password reset signs every client out, and they reconnect the same way.
+One RuneTools account can hold several characters: connect each one while you're signed in. A
+character never connects without someone approving it in a browser, and the game's account hash is
+never enough to open an account. If another account has already *proven* it plays the character (by
+syncing XP the public hiscores didn't have yet), only that account can connect it.
 
-If the server ever rejects a stored key the status line says so and the button reverts to **Connect
-to RuneTools** - clicking it re-links the character and mints a working key.
+If the server ever rejects a stored key (you disconnected that install on the site, or reset your
+password) the status line says so and the button reverts to **Connect to RuneTools**: connecting again
+is the same approval as the first time.
 
 The Collection Log and Combat Achievements are published under the character's in-game name, so the
 site refuses them (HTTP 409, `code: "rsn_taken"`) when that name is already linked to a different

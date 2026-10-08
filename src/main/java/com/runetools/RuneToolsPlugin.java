@@ -2370,16 +2370,17 @@ public class RuneToolsPlugin extends Plugin
 							{
 								// not JSON: treat it like the old answer
 							}
-							if ("email_locked".equals(why))
+							if ("email_signin".equals(why))
 							{
-								// No working key for an account secured with an email: pair this client.
-								startPairing(accountHash, rsn);
+								// Already connected; a browser session for an account with an email needs the email.
+								panel.setStatus("This account has an email - sign in with it on the site.", false);
+								SwingUtilities.invokeLater(() -> LinkBrowser.browse(api.base() + "/"));
 							}
 							else
 							{
-								// Already connected; a browser session for an email account needs the email.
-								panel.setStatus("This account is secured - sign in with your email on the site.", false);
-								SwingUtilities.invokeLater(() -> LinkBrowser.browse(api.base() + "/"));
+								// No working key for this character here ("pair", or an older server's
+								// "email_locked"): connect it by approving it in the browser.
+								startPairing(accountHash, rsn);
 							}
 							return;
 						}
@@ -2452,7 +2453,7 @@ public class RuneToolsPlugin extends Plugin
 	 */
 	private void startPairing(String accountHash, String rsn)
 	{
-		panel.setStatus("This account is secured with an email - opening the site to approve this client…", true);
+		panel.setStatus("Opening the site to approve this connection…", true);
 		api.pairStart(accountHash, rsn, new Callback()
 		{
 			@Override
