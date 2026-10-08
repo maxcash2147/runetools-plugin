@@ -60,7 +60,7 @@ class RuneToolsApiClient
 		u = u.trim().replaceAll("/+$", "");
 		// The consent disclosure promises the key travels over HTTPS - enforce it for EVERY host,
 		// localhost included. A password-equivalent key must never leave over cleartext, so any
-		// http:// is upgraded to https://. Run a local dev server over TLS (see LOCAL_TESTING.md /
+		// http:// is upgraded to https://. Run a local dev server over TLS (see the README /
 		// mkcert) and point the plugin at https://localhost:5173.
 		if (u.length() >= 7 && u.regionMatches(true, 0, "http://", 0, 7))
 		{

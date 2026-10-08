@@ -131,7 +131,13 @@ Requires a JDK 11+ and the RuneLite Gradle setup (this repo is generated from
 > an API name ever drifts, bump it or adjust the import. Build with a JDK 11 (`./gradlew build`).
 
 To point at a local/staging server during development, change **Server URL** in the plugin settings
-(default `https://runetools.com`).
+(default `https://runetools.com`). The plugin only ever talks HTTPS, `localhost` included, so serve the
+local site over TLS (for example with a [mkcert](https://github.com/FiloSottile/mkcert) certificate) and
+use `https://localhost:<port>`.
+
+To log the dev client into a Jagex account, add `--insecure-write-credentials` to the RuneLite
+launcher's client arguments and start RuneLite once from the Jagex Launcher; `./gradlew run` then
+reuses the saved credentials. Remove the argument again when you're done.
 
 ## How GE capture works (and why it doesn't double-count)
 
