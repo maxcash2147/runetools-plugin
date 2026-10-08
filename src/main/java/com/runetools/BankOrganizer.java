@@ -17,7 +17,6 @@ import net.runelite.client.plugins.banktags.tabs.Layout;
 import net.runelite.client.plugins.banktags.tabs.LayoutManager;
 import net.runelite.client.plugins.banktags.tabs.TabManager;
 import net.runelite.client.plugins.banktags.tabs.TagTab;
-import net.runelite.client.util.Text;
 
 /**
  * One-click bank organiser. Reads the items currently in the bank, asks {@link BankCategorizer}
@@ -39,8 +38,6 @@ class BankOrganizer
 	private static final String KEY_FILED = "organizedFiledItems";   // ids we've filed (for File-new)
 	private static final String ALL_TAG = "All";   // a full-bank tab shown before the category tabs
 	// Core Bank Tags config: the ordered CSV of tag-tab names the bank rebuilds its tab bar from.
-	private static final String BANKTAGS_GROUP = "banktags";
-	private static final String KEY_TAGTABS = "tagtabs";
 	private static final int COLS = 8;
 	private static final int MAX_LAYOUT_CELLS = 4096;   // hard cap on an imported layout's grid size
 
@@ -160,8 +157,7 @@ class BankOrganizer
 		}
 
 		reorderLiveTabsFirst(owned);                   // put ours first (in place for existing, front for new)
-		tabManager.save();                             // persist icons + tagtabs CSV from that order
-		writeTagTabsFirst(owned);                      // authoritative CSV write, guards a stale re-save
+		tabManager.save();                             // persist icons + tab order through Bank Tags' own API
 		configManager.setConfiguration(GROUP, KEY_OWNED, String.join(",", owned));
 		writeFiled(filed);
 
@@ -253,7 +249,7 @@ class BankOrganizer
 		if (structureChanged)
 		{
 			reorderLiveTabsFirst(owned);
-			writeTagTabsFirst(owned);
+			tabManager.save();
 			configManager.setConfiguration(GROUP, KEY_OWNED, String.join(",", owned));
 		}
 		tabManager.save();
@@ -632,32 +628,5 @@ class BankOrganizer
 		}
 		live.removeAll(ours);
 		live.addAll(0, ours);
-	}
-
-	/**
-	 * Rewrite the persisted {@code banktags.tagtabs} CSV so our tabs lead it (user tabs kept, after
-	 * ours). The bank rebuilds its tab bar from this CSV on open ({@code TabInterface}: clear ->
-	 * loadAllTabNames -> load), so this is what makes "ours first" stick across bank reopens.
-	 */
-	private void writeTagTabsFirst(List<String> owned)
-	{
-		Set<String> ownedStd = new HashSet<>();
-		for (String tag : owned)
-		{
-			ownedStd.add(Text.standardize(tag));
-		}
-		List<String> order = new ArrayList<>(owned);          // ours first, in category order
-		String raw = configManager.getConfiguration(BANKTAGS_GROUP, KEY_TAGTABS);
-		if (raw != null && !raw.isEmpty())
-		{
-			for (String tag : Text.fromCSV(raw))
-			{
-				if (!ownedStd.contains(Text.standardize(tag)))
-				{
-					order.add(tag);                           // keep the user's own tabs, after ours
-				}
-			}
-		}
-		configManager.setConfiguration(BANKTAGS_GROUP, KEY_TAGTABS, Text.toCSV(order));
 	}
 }
