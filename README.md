@@ -28,6 +28,10 @@ your real data instead of numbers you type in.
   [runetools.com/timing](https://runetools.com/timing) links each weak spot to the drill that trains it.
 - **Live drop timeline.** When the game announces a new Collection Log item, it reaches your profile's
   drop timeline within a minute, stamped with when you got it, without opening the log.
+- **Adventurer's Log.** Your achievements go on your public RuneTools profile as they happen: level-ups
+  and 99s, quests, achievement diaries, combat tasks, pets, valuable drops, first kills, kill-count
+  milestones and personal bests, and clue milestones and rewards. Each kind has its own switch under
+  **Adventurer's Log**, and a private profile hides them all.
 
 The plugin sends nothing until you tick the consent setting and connect a character. The full list
 of what it sends, and why, is under [What it sends](#what-it-sends).
@@ -80,6 +84,7 @@ which is also where a key is revoked.
 | Combat Achievements (task list + completion) | when they change | the site's CA planner |
 | Collection Log progress counts, your complete obtained set, and the items on pages you open | counts while playing; the obtained set when you open the log in-game | a browsable collection-log replica |
 | The name of each new Collection Log item the game announces in chat, and when | with the next sync after the message (Sync Collection Log on) | your profile's drop timeline, at the time you got it |
+| Achievements for your Adventurer's Log (see [How the Adventurer's Log is filled](#how-the-adventurers-log-is-filled)): what happened, with its level, quest, area, task, item and the value the game showed, boss, kill count or time | a few seconds after each one, while that kind is switched on | your profile's Adventurer's Log and the site's latest-achievements feed |
 | Combat timing totals for the session (see [How combat timing is measured](#how-combat-timing-is-measured)) | about every 30 seconds while they change, only with **Measure combat timing** on | your real latency and prayer stats on runetools.com/timing |
 | A gear setup's worn gear, inventory, rune pouch, quiver & spellbook | when you save or update that setup | two-way gear-setup sync |
 | A bank tab's item layout | only when you export a tab to share it | publish a shareable bank layout to your profile |
@@ -123,6 +128,30 @@ game world), runs at most once each time you open the log, never runs for a log 
 someone else's house, and only runs when **Sync Collection Log** is on, you have consented and the
 character is connected. Nothing else triggers it: there is no button or timer for it. Pages you
 then click through are read straight from the interface, which adds their names and quantities.
+
+## How the Adventurer's Log is filled
+
+Everything except levels, quests and clue rewards comes from a message the game itself prints, matched
+on the same texts RuneLite's own Screenshot and Chat Commands plugins use. Lines other plugins print
+are ignored, and nothing is logged on Leagues, Deadman, beta, tournament, Fresh Start, quest-speedrun,
+PvP Arena or Last Man Standing worlds.
+
+| Entry | What the plugin watches for |
+|---|---|
+| Level-ups, 99s, total-level milestones, maxing | your real (unboosted) levels, compared with what was read a few ticks after login; the site works out total-level milestones from the new total |
+| Quests | the quest completion scroll, matched to RuneLite's list of quests |
+| Achievement diaries | "Congratulations! You have completed all of the *tier* tasks in the *area* area" |
+| Combat tasks | "Congratulations, you've completed a *tier* combat task: *task*" |
+| Pets | "You have a funny feeling like you're being followed", "...would have been followed" (a duplicate), "You feel something weird sneaking into your backpack", with the pet's name from the Collection Log line or clan broadcast that follows |
+| Drops | the game's "Valuable drop: ... (*n* coins)" (at or above **Smallest drop to log**) and "Untradeable drop: ..." messages; an untradeable drop that also makes a new Collection Log entry is left to that entry |
+| First kills and kill milestones | "Your *boss* kill count is: *n*" and the raid, chest and completion variants, at 1, 10, 50, 100, 250, 500, 1,000, 2,000, 3,000, 5,000, 10,000 and so on |
+| Personal bests | "... duration: *time* (new personal best)", paired with the kill count it came with (raids keep the team size) |
+| Clues | "You have completed *n* *tier* Treasure Trails" at 1, 10, 25, 50, 100, 250, 500, 1,000 and so on, and a reward screen worth at least **Smallest drop to log** (priced with RuneLite's item prices) |
+
+Each entry carries a random id, so a resend after a network failure is recognised and stored once.
+The site accepts only names it can check (quests, diary areas, combat tasks, pets, items and bosses it
+knows), and shows them on your profile only once the character is confirmed as yours and the profile
+isn't private.
 
 ## How combat timing is measured
 
@@ -202,6 +231,7 @@ These are every request the plugin makes, all to the configured server:
 - `POST /api/plugin/collection-log` - totals, the whole obtained set, and any pages you opened
 - `GET /api/plugin/bank-layouts` (ETag) · `POST` - pull imported layouts / publish a shared bank tab
 - `POST /api/plugin/timing` - this session's combat-timing totals (only with **Measure combat timing** on)
+- `POST /api/plugin/achievements` - achievements for your Adventurer's Log, a batch at a time
 
 All of them authenticate with `Authorization: Bearer rtk_…`. Keys can be listed and revoked on the
 site (`/api/auth/keys`, signed in with your RuneTools account).

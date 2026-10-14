@@ -302,6 +302,13 @@ class RuneToolsApiClient
 			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
 	}
 
+	/** Push achievements for the Adventurer's Log: {@code {rsn, account_hash, events: [...]}}. */
+	void postAchievements(JsonObject body, Callback callback)
+	{
+		http.newCall(authed("/api/plugin/achievements")
+			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
+	}
+
 	/** Pull the user's bank layouts (incl. ones imported on the site). A matching {@code etag} -> 304. */
 	void getBankLayouts(String etag, Callback callback)
 	{

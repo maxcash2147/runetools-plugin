@@ -18,6 +18,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -50,6 +51,7 @@ import net.runelite.api.ItemContainer;
 import net.runelite.api.NPC;
 import net.runelite.api.Player;
 import net.runelite.api.Projectile;
+import net.runelite.api.Quest;
 import net.runelite.api.ScriptID;
 import net.runelite.api.Skill;
 import net.runelite.api.WorldType;
@@ -140,6 +142,27 @@ public class RuneToolsPlugin extends Plugin
 	private static final String EP_COLLECTION_LOG = "collection-log";
 	private static final String EP_BANK_LAYOUTS = "bank-layouts";
 	private static final String EP_TIMING = "timing";
+	private static final String EP_ACHIEVEMENTS = "achievements";
+
+	// Adventurer's Log. Achievements wait here until sent, a batch at a time.
+	private static final int MAX_ACHIEVEMENTS_QUEUED = 200;
+	private static final int ACHIEVEMENTS_BATCH = 50;
+	private static final int ACHIEVEMENTS_SETTLE_TICKS = 2;   // let a tick's level-ups and quest go together
+	private static final int LEVEL_BASELINE_TICKS = 5;        // stats are still loading right after login
+	private static final int LEVEL_RESYNC_JUMP = 15;          // a jump this big is late-loading stats, not play
+	// Worlds whose characters, levels or progress are not the player's main game: nothing there is logged.
+	private static final EnumSet<WorldType> NOT_MAIN_GAME = EnumSet.of(WorldType.SEASONAL, WorldType.DEADMAN,
+		WorldType.BETA_WORLD, WorldType.TOURNAMENT_WORLD, WorldType.NOSAVE_MODE, WorldType.FRESH_START_WORLD,
+		WorldType.PVP_ARENA, WorldType.QUEST_SPEEDRUNNING, WorldType.LAST_MAN_STANDING);
+	private static final List<String> QUEST_NAMES = new ArrayList<>();
+
+	static
+	{
+		for (Quest q : Quest.values())
+		{
+			QUEST_NAMES.add(q.getName());
+		}
+	}
 
 	// Combat timing (see CombatTiming). A session's totals go up at most this often while they change.
 	private static final long TIMING_SEND_GAP_MS = 30_000L;
@@ -288,6 +311,16 @@ public class RuneToolsPlugin extends Plugin
 	// Hunllef projectiles already counted (weak, so finished projectiles fall out on their own).
 	private final Set<Projectile> seenProjectiles = Collections.newSetFromMap(new WeakHashMap<>());
 
+	// Adventurer's Log (see AdventureLog). The detector and the level baseline live on the client thread;
+	// the queue is shared with the scheduler and OkHttp threads, hence its lock.
+	private AdventureLog adventureLog;
+	private final List<JsonObject> achievements = new ArrayList<>();   // guarded by itself
+	private String achievementsOwner;                                  // guarded by achievements
+	private int achievementsQueuedTick = -1;                           // client thread
+	private final AtomicBoolean achievementsInFlight = new AtomicBoolean();
+	private Map<String, Integer> levelBaseline;                        // skill name -> real level
+	private int loggedInTick = -1;
+
 	private Widget dpsButton;   // our injected "RuneTools DPS" widget in the equipment interface (client thread only)
 
 	/** Lets the setups panel open the in-game item search and read live equipment/inventory slots. */
@@ -379,6 +412,34 @@ public class RuneToolsPlugin extends Plugin
 		setupManager.setOnDelete(id -> bankFilter.forget(id));
 		setupManager.setOnRemoteChange(remotePoll::onChanged);
 		loadoutReader = new LoadoutReader(client, itemManager);
+		adventureLog = new AdventureLog(new AdventureLog.Settings()
+		{
+			@Override
+			public boolean on(AdventureLog.Category category)
+			{
+				switch (category)
+				{
+					case LEVELS:
+						return config.logLevels();
+					case QUESTS:
+						return config.logQuests();
+					case COMBAT:
+						return config.logCombat();
+					case LOOT:
+						return config.logLoot();
+					case CLUES:
+						return config.logClues();
+					default:
+						return false;
+				}
+			}
+
+			@Override
+			public long minValue()
+			{
+				return Math.max(0, config.logMinValue());
+			}
+		});
 		loadPending();
 
 		panel = new RuneToolsPanel(this::onFilterSetup, this::onClearFilter, itemManager,
@@ -420,6 +481,12 @@ public class RuneToolsPlugin extends Plugin
 		// re-enabling would upload the previous character's pages under the new one's key.
 		discardCollectionCapture();
 		timing = null;   // a disabled plugin measures nothing; unsent timing totals are dropped
+		adventureLog.reset();
+		levelBaseline = null;
+		synchronized (achievements)
+		{
+			achievements.clear();
+		}
 		synchronized (clogLock)
 		{
 			clogUnlocks.clear();
@@ -444,6 +511,10 @@ public class RuneToolsPlugin extends Plugin
 		if (e.getGameState() == GameState.LOGGED_IN)
 		{
 			loggedIn = true;
+			if (loggedInTick < 0)
+			{
+				loggedInTick = client.getTickCount();   // levels are only trusted a few ticks after this
+			}
 		}
 		else if (e.getGameState() != GameState.LOADING)
 		{
@@ -476,6 +547,11 @@ public class RuneToolsPlugin extends Plugin
 				timing.interrupt();
 				timingFresh = true;
 			}
+			// Half-seen achievements (a kill waiting for its time, a pet for its name) can't finish
+			// now, and the next login reads its levels afresh. Queued ones stay with their character.
+			adventureLog.reset();
+			levelBaseline = null;
+			loggedInTick = -1;
 		}
 	}
 
@@ -491,11 +567,70 @@ public class RuneToolsPlugin extends Plugin
 		{
 			clogAskedThisOpen = false;   // a fresh opening of the log may ask for the whole log once
 		}
+		else if (e.getGroupId() == InterfaceID.QUESTSCROLL && adventureLogOn())
+		{
+			Widget title = client.getWidget(InterfaceID.Questscroll.QUEST_TITLE);
+			final String text = title != null ? Text.removeTags(title.getText()) : null;
+			// A moment later, so the completed-quest count has caught up with this quest.
+			clientThread.invokeLater(() ->
+			{
+				String quest = AdventureLog.matchQuest(text, QUEST_NAMES);
+				if (quest != null)
+				{
+					adventureLog.onQuest(quest, client.getVarbitValue(VarbitID.QUESTS_COMPLETED_COUNT),
+						System.currentTimeMillis());
+				}
+				else if (text != null)
+				{
+					log.debug("RuneTools: no quest matched the completion scroll \"{}\"", text);
+				}
+			});
+		}
+		else if (e.getGroupId() == InterfaceID.TRAIL_REWARDSCREEN && adventureLogOn())
+		{
+			readClueReward();
+		}
+	}
+
+	/** The items on a clue reward screen, priced, most valuable first. Client thread. */
+	private void readClueReward()
+	{
+		Widget box = client.getWidget(InterfaceID.TrailRewardscreen.ITEMS);
+		Widget[] children = box != null ? box.getChildren() : null;
+		if (children == null)
+		{
+			return;
+		}
+		Map<Integer, Integer> qty = new LinkedHashMap<>();
+		for (Widget w : children)
+		{
+			if (w != null && w.getItemId() > 0 && w.getItemQuantity() > 0)
+			{
+				qty.merge(w.getItemId(), w.getItemQuantity(), Integer::sum);
+			}
+		}
+		List<long[]> priced = new ArrayList<>();
+		long total = 0;
+		for (Map.Entry<Integer, Integer> en : qty.entrySet())
+		{
+			long each = en.getKey() == COINS_ITEM_ID ? 1 : itemManager.getItemPrice(en.getKey());
+			long value = Math.max(0, each) * en.getValue();
+			total += value;
+			priced.add(new long[]{en.getKey(), en.getValue(), value});
+		}
+		priced.sort((a, b) -> Long.compare(b[2], a[2]));
+		List<int[]> items = new ArrayList<>();
+		for (long[] p : priced)
+		{
+			items.add(new int[]{(int) p[0], (int) p[1]});
+		}
+		adventureLog.onClueReward(items, total, System.currentTimeMillis());
 	}
 
 	@Subscribe
 	public void onStatChanged(StatChanged e)
 	{
+		trackLevel(e.getSkill());
 		if (!config.syncState())
 		{
 			return;
@@ -565,6 +700,7 @@ public class RuneToolsPlugin extends Plugin
 			}
 		}
 		finishCollectionLogStream();
+		tickAdventureLog();
 	}
 
 	/**
@@ -661,6 +797,7 @@ public class RuneToolsPlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage e)
 	{
+		feedAdventureLog(e);
 		if (e.getType() == ChatMessageType.GAMEMESSAGE)
 		{
 			String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
@@ -1088,6 +1225,248 @@ public class RuneToolsPlugin extends Plugin
 		return arr;
 	}
 
+	// -- Adventurer's Log (client thread unless noted; see AdventureLog) ------ //
+
+	/**
+	 * Whether achievements are watched at all: some category is on, the player consented, this
+	 * character is connected and in game, and the world is the main game (not Leagues, Deadman, a
+	 * beta or tournament world and so on, whose progress isn't the character's own).
+	 */
+	private boolean adventureLogOn()
+	{
+		if (!(config.logLevels() || config.logQuests() || config.logCombat() || config.logLoot() || config.logClues()))
+		{
+			return false;
+		}
+		if (!hasKeyAndConsent() || !snapshot.get().hasIdentity() || client.getGameState() != GameState.LOGGED_IN)
+		{
+			return false;
+		}
+		EnumSet<WorldType> types = client.getWorldType();
+		for (WorldType t : NOT_MAIN_GAME)
+		{
+			if (types != null && types.contains(t))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/** Hand the game's own messages to the detector. Messages other plugins print are ignored. */
+	private void feedAdventureLog(ChatMessage e)
+	{
+		ChatMessageType type = e.getType();
+		if (type != ChatMessageType.GAMEMESSAGE && type != ChatMessageType.MESBOX
+			&& type != ChatMessageType.FRIENDSCHATNOTIFICATION && type != ChatMessageType.CLAN_MESSAGE
+			&& type != ChatMessageType.CLAN_GIM_MESSAGE && type != ChatMessageType.CLAN_GUEST_MESSAGE)
+		{
+			return;
+		}
+		if (!adventureLogOn())
+		{
+			return;
+		}
+		String source = e.getName() != null && !e.getName().isEmpty() ? e.getName() : e.getSender();
+		if ("runelite".equalsIgnoreCase(source))
+		{
+			return;   // a plugin's own chat line, not the game's
+		}
+		String raw = e.getMessage() != null ? e.getMessage() : "";
+		String text = Text.removeTags(raw.replace("<br>", "\n")).replace(' ', ' ').trim();
+		long now = System.currentTimeMillis();
+		if (type == ChatMessageType.CLAN_MESSAGE || type == ChatMessageType.CLAN_GIM_MESSAGE
+			|| type == ChatMessageType.CLAN_GUEST_MESSAGE)
+		{
+			adventureLog.onClanMessage(text, snapshot.get().rsn);
+		}
+		else
+		{
+			adventureLog.onGameMessage(text, now);
+		}
+	}
+
+	/**
+	 * A skill's real level may have gone up. Compared with what was read after login, so loading
+	 * stats, boosts and drains never count; only real levels up to 99 are levels.
+	 */
+	private void trackLevel(Skill skill)
+	{
+		if (levelBaseline == null || skill == null || "Overall".equals(skill.getName()) || !adventureLogOn())
+		{
+			return;
+		}
+		String name = skill.getName();
+		int now = client.getRealSkillLevel(skill);
+		Integer before = levelBaseline.get(name);
+		levelBaseline.put(name, now);
+		if (before == null || now <= before || now - before > LEVEL_RESYNC_JUMP)
+		{
+			return;   // first sight, no gain, or stats still settling
+		}
+		int total = 0;
+		boolean maxed = true;
+		for (int lvl : levelBaseline.values())
+		{
+			total += lvl;
+			maxed &= lvl >= 99;
+		}
+		adventureLog.onLevelUp(name, before, Math.min(99, now), total, maxed && before < 99,
+			System.currentTimeMillis());
+	}
+
+	/** Read every skill's real level once stats have loaded after login. */
+	private void initLevelBaseline()
+	{
+		if (levelBaseline != null || loggedInTick < 0 || client.getTickCount() - loggedInTick < LEVEL_BASELINE_TICKS)
+		{
+			return;
+		}
+		if (client.getRealSkillLevel(Skill.HITPOINTS) < 10)
+		{
+			return;   // not loaded yet: every character has at least 10 Hitpoints
+		}
+		Map<String, Integer> base = new HashMap<>();
+		for (Skill sk : Skill.values())
+		{
+			if (!"Overall".equals(sk.getName()))
+			{
+				base.put(sk.getName(), client.getRealSkillLevel(sk));
+			}
+		}
+		levelBaseline = base;
+	}
+
+	/** Per tick: finish half-seen achievements, queue what's done, and send once a tick's worth has settled. */
+	private void tickAdventureLog()
+	{
+		if (!adventureLogOn())
+		{
+			adventureLog.reset();
+			adventureLog.drain();   // nothing is kept while the log is off
+			return;
+		}
+		initLevelBaseline();
+		adventureLog.onTick(client.getTickCount());
+		if (adventureLog.hasReady())
+		{
+			queueAchievements(adventureLog.drain());
+		}
+		boolean due;
+		synchronized (achievements)
+		{
+			due = !achievements.isEmpty() && client.getTickCount() - achievementsQueuedTick >= ACHIEVEMENTS_SETTLE_TICKS;
+		}
+		if (due)
+		{
+			flushAchievements();
+		}
+	}
+
+	/** Queue finished achievements under the character that earned them; another character's are dropped. */
+	private void queueAchievements(List<JsonObject> events)
+	{
+		String owner = syncIdentity();
+		synchronized (achievements)
+		{
+			if (!owner.equals(achievementsOwner))
+			{
+				achievements.clear();
+				achievementsOwner = owner;
+			}
+			if (achievements.isEmpty())
+			{
+				achievementsQueuedTick = client.getTickCount();
+			}
+			achievements.addAll(events);
+			while (achievements.size() > MAX_ACHIEVEMENTS_QUEUED)
+			{
+				achievements.remove(0);
+			}
+		}
+	}
+
+	/**
+	 * Send the oldest queued achievements, one request at a time. Any thread (the tick and the 20s
+	 * sweep both call it). Gated like the rest of the background loop; a refusal the server will
+	 * never accept is dropped, anything else stays queued for the next try.
+	 */
+	private void flushAchievements()
+	{
+		if (!syncAllowed() || System.currentTimeMillis() < nextSyncAtMillis)
+		{
+			return;
+		}
+		final String identity = syncIdentity();
+		final List<JsonObject> batch;
+		synchronized (achievements)
+		{
+			if (achievements.isEmpty() || !identity.equals(achievementsOwner))
+			{
+				return;
+			}
+			batch = new ArrayList<>(achievements.subList(0, Math.min(ACHIEVEMENTS_BATCH, achievements.size())));
+		}
+		if (parking.isNameParked(EP_ACHIEVEMENTS, identity) || !achievementsInFlight.compareAndSet(false, true))
+		{
+			return;
+		}
+		JsonArray events = new JsonArray();
+		for (JsonObject ev : batch)
+		{
+			events.add(ev);
+		}
+		JsonObject body = new JsonObject();
+		stampIdentity(body);
+		body.add("events", events);
+		final long payload = events.toString().hashCode();
+		if (parking.isParked(EP_ACHIEVEMENTS, identity, payload))
+		{
+			dropAchievements(batch);   // exactly these were refused for good before
+			achievementsInFlight.set(false);
+			return;
+		}
+		api.postAchievements(body, new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				achievementsInFlight.set(false);
+				noteSyncFailure();
+				log.debug("RuneTools: achievements sync failed (will retry): {}", ex.getMessage());
+			}
+
+			@Override
+			public void onResponse(Call call, Response resp)
+			{
+				try (Response r = resp)
+				{
+					SyncResponse.Outcome outcome = noteSyncResult(r, EP_ACHIEVEMENTS, identity, payload);
+					if (r.isSuccessful() || outcome == SyncResponse.Outcome.PAYLOAD_REJECTED)
+					{
+						dropAchievements(batch);
+					}
+					else
+					{
+						log.debug("RuneTools: achievements sync HTTP {} (kept queued)", r.code());
+					}
+				}
+				finally
+				{
+					achievementsInFlight.set(false);
+				}
+			}
+		});
+	}
+
+	private void dropAchievements(List<JsonObject> sent)
+	{
+		synchronized (achievements)
+		{
+			achievements.removeAll(sent);
+		}
+	}
+
 	// -- combat timing (client thread; see CombatTiming) ---------------------- //
 
 	/**
@@ -1403,6 +1782,7 @@ public class RuneToolsPlugin extends Plugin
 		{
 			syncTiming();
 		}
+		flushAchievements();   // anything a failed send left queued (normally sent from the tick)
 	}
 
 	/**

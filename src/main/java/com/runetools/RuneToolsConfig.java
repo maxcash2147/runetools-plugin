@@ -78,8 +78,13 @@ public interface RuneToolsConfig extends Config
 			+ "- A bank tab's item layout, only when you export it to share it.\n"
 			+ "- Your bank contents, only if you turn on \"Include bank\".\n"
 			+ "- Combat timing totals, only if you turn on \"Measure combat timing\" (see that setting).\n"
+			+ "- Achievements as they happen, for the Adventurer's Log on your public profile: level-ups, "
+			+ "quests, achievement diaries, combat tasks, pets, valuable and untradeable drops (the item and "
+			+ "the value the game shows), boss kill-count milestones and personal bests, and clue "
+			+ "milestones and valuable clue rewards.\n"
 			+ "Nothing else is sent. The automatic syncs can each be switched off under \"What to "
-			+ "sync\", \"Gear setups\" and \"Combat timing\".\n"
+			+ "sync\", \"Gear setups\", \"Combat timing\" and \"Adventurer's Log\", and your profile can be "
+			+ "made private on the site.\n"
 			// The Plugin Hub requires this sentence, near enough verbatim, on any config item that
 			// turns on a third-party-server feature. Without it the plugin fails review.
 			+ "This feature submits your IP address to a 3rd-party server not controlled or verified "
@@ -234,5 +239,89 @@ public interface RuneToolsConfig extends Config
 	default boolean syncTiming()
 	{
 		return false;
+	}
+
+	@ConfigSection(
+		name = "Adventurer's Log",
+		description = "Put your achievements on the Adventurer's Log of your RuneTools profile as they happen",
+		position = 4
+	)
+	String logSection = "adventureLog";
+
+	@ConfigItem(
+		keyName = "logLevels",
+		name = "Level-ups",
+		description = "Log each level you gain, your 99s, total-level milestones and maxing. Seasonal, "
+			+ "Deadman, beta and other special worlds are never logged.",
+		section = logSection,
+		position = 0
+	)
+	default boolean logLevels()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "logQuests",
+		name = "Quests and diaries",
+		description = "Log each quest you complete and each achievement diary tier you finish.",
+		section = logSection,
+		position = 1
+	)
+	default boolean logQuests()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "logCombat",
+		name = "Combat tasks and kills",
+		description = "Log the combat tasks you complete, your first kill and kill-count milestones (10, 50, "
+			+ "100, 250, 500, 1,000 and on) at each boss, and new personal bests.",
+		section = logSection,
+		position = 2
+	)
+	default boolean logCombat()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "logLoot",
+		name = "Pets and drops",
+		description = "Log pets, and the game's own \"Valuable drop\" (at or above the value below) and "
+			+ "\"Untradeable drop\" messages. Those messages only appear when they are switched on in the "
+			+ "game's settings (Chat, Loot drop notifications).",
+		section = logSection,
+		position = 3
+	)
+	default boolean logLoot()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "logClues",
+		name = "Clue scrolls",
+		description = "Log clue milestones per tier (your first, 10th, 25th, 50th, 100th and on) and clue "
+			+ "rewards worth at least the value below.",
+		section = logSection,
+		position = 4
+	)
+	default boolean logClues()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "logMinValue",
+		name = "Smallest drop to log (gp)",
+		description = "Valuable drops and clue rewards worth less than this are left out of your log.",
+		section = logSection,
+		position = 5
+	)
+	default int logMinValue()
+	{
+		return 1_000_000;
 	}
 }
