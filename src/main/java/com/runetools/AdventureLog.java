@@ -38,7 +38,22 @@ final class AdventureLog
 	/** The categories, each switched on or off by its own setting. */
 	enum Category
 	{
-		LEVELS, QUESTS, COMBAT, LOOT, CLUES
+		LEVELS, QUESTS, COMBAT, PETS, DROPS, CLUES
+	}
+
+	/** One stack of loot from a chest or raid, priced by the plugin: {@code value} is the whole stack's. */
+	static final class LootStack
+	{
+		final String name;
+		final int qty;
+		final long value;
+
+		LootStack(String name, int qty, long value)
+		{
+			this.name = name;
+			this.qty = qty;
+			this.value = value;
+		}
 	}
 
 	/** What the player has switched on, read fresh for every event. */
@@ -76,15 +91,19 @@ final class AdventureLog
 	// "Congratulations! You have completed all of the hard tasks in the Varrock area. Speak to ..."
 	private static final Pattern DIARY = Pattern.compile(
 		"Congratulations! You have completed all of the (\\w+) tasks in the (.+?) area", Pattern.CASE_INSENSITIVE);
-	// The three pet messages: a new pet following you, one sneaking into your backpack (follower
-	// already out), and a duplicate you would have got.
+	// The pet messages: a new pet following you ("You have a funny feeling like you're being
+	// followed."), one sneaking into your backpack (follower already out), and a duplicate you would
+	// have got ("...like you would have been followed..."). Matched on their common start.
 	private static final Pattern PET = Pattern.compile(
-		"^You (?:have a funny feeling like you(?:'re being followed| would have been followed)"
-			+ "|feel something weird sneaking into your backpack)", Pattern.CASE_INSENSITIVE);
-	// "<player> has a funny feeling like he's being followed: Pet snakeling at 1,234 kills." (clan)
+		"^You (?:have a funny feeling like you|feel something weird sneaking into your backpack)",
+		Pattern.CASE_INSENSITIVE);
+	// The clan broadcast, which may carry the clan's name first and ends with when the pet came:
+	// "[Clan] <player> has a funny feeling like he would have been followed: Pet snakeling at 50 killcount.",
+	// "<player> feels something weird sneaking into her backpack: Heron at 12,345,678 XP.",
+	// "<player> feels like she's acquired something special: Tumeken's guardian".
 	private static final Pattern CLAN_PET = Pattern.compile(
-		"^(.+?) (?:has a funny feeling like .+ followed|feels something weird sneaking into .+ backpack)"
-			+ ": (.+?)(?: at .+)?\\.?$");
+		"^(?:\\[[^\\]]*\\] )?(.+?) (?:has a funny feeling like .+? followed|feels something weird sneaking into .+? backpack"
+			+ "|feels like .+? acquired something special): (.+?)(?: at (.+?))?\\.?$");
 	private static final Pattern CLOG_ITEM = Pattern.compile("New item added to your collection log: (.+?)\\.?$",
 		Pattern.CASE_INSENSITIVE);
 	private static final Pattern UNTRADEABLE = Pattern.compile("^Untradeable drop: (.+?)\\.?$");
@@ -92,9 +111,9 @@ final class AdventureLog
 	private static final Pattern VALUABLE = Pattern.compile(
 		"^Valuable drop: (?:([\\d,]+) x )?(.+?) \\(([\\d,]+) coins\\)");
 	// Kill counts. "Your Zulrah kill count is: 100.", "Your Barrows chest count is: 50.",
-	// "Your Corrupted Gauntlet completion count is: 10."
+	// "Your Corrupted Gauntlet completion count is: 10.", "Your herbiboar harvest count is: 25."
 	private static final Pattern KC_PRIMARY = Pattern.compile(
-		"Your (.+?) (kill|chest|completion|success) count is: ?([\\d,]+)", Pattern.CASE_INSENSITIVE);
+		"Your (.+?) (kill|chest|completion|success|harvest) count is: ?([\\d,]+)", Pattern.CASE_INSENSITIVE);
 	// "Your completed Chambers of Xeric count is: 50.", "Your subdued Wintertodt count is: 500."
 	private static final Pattern KC_SECONDARY = Pattern.compile(
 		"Your (?:completed|subdued) (.+?) count is: ?([\\d,]+)", Pattern.CASE_INSENSITIVE);
@@ -135,6 +154,7 @@ final class AdventureLog
 		final boolean backpack;
 		final long at;
 		final Set<String> names = new LinkedHashSet<>();
+		String milestone;   // "50 killcount", from the clan broadcast when there is one
 
 		PendingPet(int tick, boolean duplicate, boolean backpack, long at)
 		{
@@ -257,7 +277,7 @@ final class AdventureLog
 		}
 		if ((m = PET.matcher(text)).find())
 		{
-			if (on(Category.LOOT))
+			if (on(Category.PETS))
 			{
 				flushPet();   // two pets in a row: the first keeps whatever name it found
 				String lower = text.toLowerCase(Locale.ROOT);
@@ -289,7 +309,7 @@ final class AdventureLog
 			{
 				addPetName(name);
 			}
-			if (on(Category.LOOT) && !name.isEmpty() && !(loggedTick == tick && loggedThisTick.contains(name.toLowerCase(Locale.ROOT))))
+			if (on(Category.DROPS) && !name.isEmpty() && !(loggedTick == tick && loggedThisTick.contains(name.toLowerCase(Locale.ROOT))))
 			{
 				untradeables.add(new PendingDrop(tick, name, now));
 			}
@@ -298,7 +318,7 @@ final class AdventureLog
 		if ((m = VALUABLE.matcher(text)).find())
 		{
 			long value = number(m.group(3));
-			if (on(Category.LOOT) && value >= settings.minValue() && value > 0)
+			if (on(Category.DROPS) && value >= settings.minValue() && value > 0)
 			{
 				JsonObject e = event("drop", now);
 				e.addProperty("item", clean(m.group(2)));
@@ -327,13 +347,22 @@ final class AdventureLog
 			}
 			return;
 		}
+		// A Theatre of Blood room message gives the room's own time before the raid's ("Wave 'The
+		// Final Challenge' (Normal Mode) complete! Duration: 7:42.60 Theatre of Blood completion time:
+		// 21:33.60 (new personal best)"): only the raid's part can be the raid's best.
+		String timed = text;
+		if (text.startsWith("Wave '"))
+		{
+			int raid = text.indexOf("Theatre of Blood");
+			timed = raid < 0 ? "" : text.substring(raid);
+		}
 		// A raid's completion message carries the team size, so it is checked before the general time.
-		if ((m = RAID_PB.matcher(text)).find())
+		if ((m = RAID_PB.matcher(timed)).find())
 		{
 			time = new PendingTime(tick, m.group(2), m.group(1));
 			return;
 		}
-		if ((m = PB.matcher(text)).find())
+		if ((m = PB.matcher(timed)).find())
 		{
 			time = new PendingTime(tick, m.group(1), null);
 		}
@@ -381,6 +410,10 @@ final class AdventureLog
 		if (m.find() && m.group(1).trim().equalsIgnoreCase(me.trim()))
 		{
 			addPetName(clean(m.group(2)));
+			if (m.group(3) != null && pet.milestone == null)
+			{
+				pet.milestone = clean(m.group(3));
+			}
 		}
 	}
 
@@ -428,7 +461,7 @@ final class AdventureLog
 	 */
 	void onClueReward(List<int[]> items, long value, long now)
 	{
-		if (!on(Category.CLUES) || items == null || items.isEmpty() || value < settings.minValue() || value <= 0)
+		if (!on(Category.DROPS) || items == null || items.isEmpty() || value < settings.minValue() || value <= 0)
 		{
 			return;
 		}
@@ -455,6 +488,38 @@ final class AdventureLog
 		}
 		e.add("items", arr);
 		add(e);
+	}
+
+	/**
+	 * Loot from a chest or a raid (Barrows, the raids' reward chests, the Moons...), which the game
+	 * doesn't announce the way it does an NPC's valuable drop. Each stack worth at least the value
+	 * setting is logged as a drop, the most valuable first, up to {@link #MAX_REWARD_ITEMS}.
+	 */
+	void onChestLoot(List<LootStack> stacks, long now)
+	{
+		if (!on(Category.DROPS) || stacks == null)
+		{
+			return;
+		}
+		List<LootStack> worth = new ArrayList<>();
+		for (LootStack s : stacks)
+		{
+			if (s != null && s.name != null && !s.name.trim().isEmpty() && s.qty > 0 && s.value > 0
+				&& s.value >= settings.minValue())
+			{
+				worth.add(s);
+			}
+		}
+		worth.sort((a, b) -> Long.compare(b.value, a.value));
+		for (int i = 0; i < worth.size() && i < MAX_REWARD_ITEMS; i++)
+		{
+			LootStack s = worth.get(i);
+			JsonObject e = event("drop", now);
+			e.addProperty("item", clean(s.name));
+			e.addProperty("qty", s.qty);
+			e.addProperty("value", s.value);
+			add(e);
+		}
 	}
 
 	/**
@@ -538,11 +603,15 @@ final class AdventureLog
 	{
 		PendingPet p = pet;
 		pet = null;
-		if (p == null || !on(Category.LOOT))
+		if (p == null || !on(Category.PETS))
 		{
 			return;
 		}
 		JsonObject e = event("pet", p.at);
+		if (p.milestone != null && !p.milestone.isEmpty())
+		{
+			e.addProperty("milestone", p.milestone);
+		}
 		if (p.duplicate)
 		{
 			e.addProperty("duplicate", true);
@@ -625,6 +694,27 @@ final class AdventureLog
 	}
 
 	/**
+	 * Recipe for Disaster's subquests end with scrolls that name who was helped rather than the
+	 * subquest ("You have freed the Goblin Generals!", "You have assisted the Lumbridge Cook...
+	 * again!"): what each title contains (squashed), and the subquest it is in RuneLite's list. The
+	 * finale is "You have completed Recipe for Disaster!", matched like any other quest.
+	 */
+	private static final String[][] RFD_SUBQUESTS = {
+		{"anothercooksquest", "Another Cook's Quest"},
+		{"lumbridgecookagain", "Another Cook's Quest"},
+		{"mountaindwarf", "Mountain Dwarf"},
+		{"goblingenerals", "Wartface & Bentnoze"},
+		{"wartface", "Wartface & Bentnoze"},
+		{"piratepete", "Pirate Pete"},
+		{"lumbridgeguide", "Lumbridge Guide"},
+		{"evildave", "Evil Dave"},
+		{"skrach", "Skrach Uglogwee"},
+		{"siramikvarze", "Sir Amik Varze"},
+		{"awowogei", "King Awowogei"},
+		{"culinaromancer", "Culinaromancer"},
+	};
+
+	/**
 	 * Which quest a completion scroll's title names ("You have completed The Corsair Curse!",
 	 * "'One Small Favour' completed!"), from the game's own quest list: the longest quest name found
 	 * in the title, ignoring case and punctuation. A partial completion ("kind of") is not one.
@@ -641,6 +731,17 @@ final class AdventureLog
 			return null;
 		}
 		String key = squash(t);
+		if (!key.contains("recipefordisaster"))
+		{
+			for (String[] sub : RFD_SUBQUESTS)
+			{
+				String name = "Recipe for Disaster - " + sub[1];
+				if (key.contains(sub[0]) && questNames.contains(name))
+				{
+					return name;
+				}
+			}
+		}
 		String best = null;
 		int bestLen = 0;
 		for (String q : questNames)

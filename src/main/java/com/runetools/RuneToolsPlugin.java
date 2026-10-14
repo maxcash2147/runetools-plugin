@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -77,7 +78,10 @@ import net.runelite.api.widgets.WidgetUtil;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.plugins.loottracker.LootReceived;
+import net.runelite.http.api.loottracker.LootRecordType;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.ItemStack;
 import net.runelite.client.game.ItemStats;
 import net.runelite.client.game.ItemEquipmentStats;
 import net.runelite.client.game.SpriteManager;
@@ -146,7 +150,7 @@ public class RuneToolsPlugin extends Plugin
 	private static final int ACHIEVEMENTS_BATCH = 50;
 	private static final int ACHIEVEMENTS_SETTLE_TICKS = 2;   // let a tick's level-ups and quest go together
 	private static final int LEVEL_BASELINE_TICKS = 5;        // stats are still loading right after login
-	private static final int LEVEL_RESYNC_JUMP = 15;          // a jump this big is late-loading stats, not play
+	private static final int LEVEL_RESYNC_JUMP = 15;          // this big from no XP is late-loading stats, not play
 	// Worlds whose characters, levels or progress are not the player's main game: nothing there is logged.
 	private static final EnumSet<WorldType> NOT_MAIN_GAME = EnumSet.of(WorldType.SEASONAL, WorldType.DEADMAN,
 		WorldType.BETA_WORLD, WorldType.TOURNAMENT_WORLD, WorldType.NOSAVE_MODE, WorldType.FRESH_START_WORLD,
@@ -316,6 +320,7 @@ public class RuneToolsPlugin extends Plugin
 	private int achievementsQueuedTick = -1;                           // client thread
 	private final AtomicBoolean achievementsInFlight = new AtomicBoolean();
 	private Map<String, Integer> levelBaseline;                        // skill name -> real level
+	private Map<String, Integer> levelBaselineXp;                      // skill name -> its XP then
 	private int loggedInTick = -1;
 
 	private Widget dpsButton;   // our injected "RuneTools DPS" widget in the equipment interface (client thread only)
@@ -422,8 +427,10 @@ public class RuneToolsPlugin extends Plugin
 						return config.logQuests();
 					case COMBAT:
 						return config.logCombat();
-					case LOOT:
-						return config.logLoot();
+					case PETS:
+						return config.logPets();
+					case DROPS:
+						return config.logDrops();
 					case CLUES:
 						return config.logClues();
 					default:
@@ -480,6 +487,7 @@ public class RuneToolsPlugin extends Plugin
 		timing = null;   // a disabled plugin measures nothing; unsent timing totals are dropped
 		adventureLog.reset();
 		levelBaseline = null;
+		levelBaselineXp = null;
 		synchronized (achievements)
 		{
 			achievements.clear();
@@ -548,6 +556,7 @@ public class RuneToolsPlugin extends Plugin
 			// now, and the next login reads its levels afresh. Queued ones stay with their character.
 			adventureLog.reset();
 			levelBaseline = null;
+			levelBaselineXp = null;
 			loggedInTick = -1;
 		}
 	}
@@ -622,6 +631,35 @@ public class RuneToolsPlugin extends Plugin
 			items.add(new int[]{(int) p[0], (int) p[1]});
 		}
 		adventureLog.onClueReward(items, total, System.currentTimeMillis());
+	}
+
+	/**
+	 * Loot from chests and raids (Barrows, the raid reward chests, the Moons...), which the game
+	 * doesn't announce like an NPC's valuable drop, as RuneLite's Loot Tracker reports it. NPC drops
+	 * come from the game's own messages instead, and clue rewards from their reward screen.
+	 */
+	@Subscribe
+	public void onLootReceived(LootReceived e)
+	{
+		String source = e.getName() != null ? e.getName().toLowerCase(Locale.ROOT) : "";
+		if (e.getType() != LootRecordType.EVENT || source.contains("clue") || source.contains("casket")
+			|| !config.logDrops() || !adventureLogOn() || e.getItems() == null)
+		{
+			return;
+		}
+		List<AdventureLog.LootStack> stacks = new ArrayList<>();
+		for (ItemStack it : e.getItems())
+		{
+			if (it == null || it.getId() <= 0 || it.getQuantity() <= 0)
+			{
+				continue;
+			}
+			int id = itemManager.canonicalize(it.getId());
+			long each = id == COINS_ITEM_ID ? 1 : itemManager.getItemPrice(id);
+			stacks.add(new AdventureLog.LootStack(itemManager.getItemComposition(id).getName(), it.getQuantity(),
+				Math.max(0, each) * it.getQuantity()));
+		}
+		adventureLog.onChestLoot(stacks, System.currentTimeMillis());
 	}
 
 	@Subscribe
@@ -1231,7 +1269,8 @@ public class RuneToolsPlugin extends Plugin
 	 */
 	private boolean adventureLogOn()
 	{
-		if (!(config.logLevels() || config.logQuests() || config.logCombat() || config.logLoot() || config.logClues()))
+		if (!(config.logLevels() || config.logQuests() || config.logCombat() || config.logPets() || config.logDrops()
+			|| config.logClues()))
 		{
 			return false;
 		}
@@ -1296,8 +1335,13 @@ public class RuneToolsPlugin extends Plugin
 		String name = skill.getName();
 		int now = client.getRealSkillLevel(skill);
 		Integer before = levelBaseline.get(name);
+		Integer xpBefore = levelBaselineXp.get(name);
 		levelBaseline.put(name, now);
-		if (before == null || now <= before || now - before > LEVEL_RESYNC_JUMP)
+		levelBaselineXp.put(name, client.getSkillExperience(skill));
+		// A big jump from a skill that had no XP at all is its real level arriving late, not play. A
+		// big jump from real XP is real (a quest reward can lift a low skill many levels at once).
+		if (before == null || now <= before
+			|| (now - before > LEVEL_RESYNC_JUMP && (xpBefore == null || xpBefore <= 0)))
 		{
 			return;   // first sight, no gain, or stats still settling
 		}
@@ -1324,13 +1368,16 @@ public class RuneToolsPlugin extends Plugin
 			return;   // not loaded yet: every character has at least 10 Hitpoints
 		}
 		Map<String, Integer> base = new HashMap<>();
+		Map<String, Integer> xp = new HashMap<>();
 		for (Skill sk : Skill.values())
 		{
 			if (!"Overall".equals(sk.getName()))
 			{
 				base.put(sk.getName(), client.getRealSkillLevel(sk));
+				xp.put(sk.getName(), client.getSkillExperience(sk));
 			}
 		}
+		levelBaselineXp = xp;
 		levelBaseline = base;
 	}
 
@@ -3356,6 +3403,17 @@ public class RuneToolsPlugin extends Plugin
 		final Pairing p = pairing.get();
 		if (p == null)
 		{
+			return;
+		}
+		// Approving hands this client the character's key, so only ask while it may sync: consent
+		// given, and the character that asked still logged in (a hop or a loading screen is fine).
+		GameState state = client.getGameState();
+		String playing = snapshot.get().accountHash;
+		if (!config.consent() || state == GameState.LOGIN_SCREEN || state == GameState.LOGIN_SCREEN_AUTHENTICATOR
+			|| (playing != null && p.accountHash != null && !playing.equals(p.accountHash)))
+		{
+			pairing.compareAndSet(p, null);
+			panel.setStatus("Connecting was cancelled - click Connect to try again.", false);
 			return;
 		}
 		if (System.currentTimeMillis() > p.expiresAtMillis)

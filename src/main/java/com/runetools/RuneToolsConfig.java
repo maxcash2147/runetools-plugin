@@ -79,9 +79,9 @@ public interface RuneToolsConfig extends Config
 			+ "- Your bank contents, only if you turn on \"Include bank\".\n"
 			+ "- Combat timing totals, only if you turn on \"Measure combat timing\" (see that setting).\n"
 			+ "- Achievements as they happen, for the Adventurer's Log on your public profile: level-ups, "
-			+ "quests, achievement diaries, combat tasks, pets, valuable and untradeable drops (the item and "
-			+ "the value the game shows), boss kill-count milestones and personal bests, and clue "
-			+ "milestones and valuable clue rewards.\n"
+			+ "quests, achievement diaries, combat tasks, pets, boss kill-count milestones and personal "
+			+ "bests, and clue milestones; and, only with \"Drops and loot\" on, valuable and untradeable "
+			+ "drops, chest and raid loot and valuable clue rewards (the item and its value).\n"
 			+ "Nothing else is sent. The automatic syncs can each be switched off under \"What to "
 			+ "sync\", \"Gear setups\", \"Combat timing\" and \"Adventurer's Log\", and your profile can be "
 			+ "made private on the site.\n"
@@ -287,26 +287,39 @@ public interface RuneToolsConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "logLoot",
-		name = "Pets and drops",
-		description = "Log pets, and the game's own \"Valuable drop\" (at or above the value below) and "
-			+ "\"Untradeable drop\" messages. Those messages only appear when they are switched on in the "
-			+ "game's settings (Chat, Loot drop notifications).",
+		keyName = "logPets",
+		name = "Pets",
+		description = "Log each pet you get, and a duplicate you would have got.",
 		section = logSection,
 		position = 3
 	)
-	default boolean logLoot()
+	default boolean logPets()
 	{
 		return true;
 	}
 
 	@ConfigItem(
-		keyName = "logClues",
-		name = "Clue scrolls",
-		description = "Log clue milestones per tier (your first, 10th, 25th, 50th, 100th and on) and clue "
-			+ "rewards worth at least the value below.",
+		keyName = "logDrops",
+		name = "Drops and loot",
+		description = "Log what you get: the game's own \"Valuable drop\" (at or above the value below) and "
+			+ "\"Untradeable drop\" messages, valuable loot from chests and raids (as RuneLite's Loot Tracker "
+			+ "sees it) and clue rewards. Off by default, since it shows what you got on your public profile. "
+			+ "The drop messages only appear when they are switched on in the game's settings (Chat, Loot "
+			+ "drop notifications).",
 		section = logSection,
 		position = 4
+	)
+	default boolean logDrops()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "logClues",
+		name = "Clue scrolls",
+		description = "Log clue milestones per tier (your first, 10th, 25th, 50th, 100th and on).",
+		section = logSection,
+		position = 5
 	)
 	default boolean logClues()
 	{
@@ -316,9 +329,9 @@ public interface RuneToolsConfig extends Config
 	@ConfigItem(
 		keyName = "logMinValue",
 		name = "Smallest drop to log (gp)",
-		description = "Valuable drops and clue rewards worth less than this are left out of your log.",
+		description = "Drops, chest loot and clue rewards worth less than this are left out of your log.",
 		section = logSection,
-		position = 5
+		position = 6
 	)
 	default int logMinValue()
 	{

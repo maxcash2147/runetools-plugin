@@ -302,6 +302,107 @@ public class AdventureLogTest
 	}
 
 	@Test
+	public void recipeForDisasterSubquestsAreTheirOwnQuests()
+	{
+		// The scroll titles the game shows for each part, and the names in RuneLite's quest list.
+		List<String> quests = Arrays.asList("Cook's Assistant", "Recipe for Disaster",
+			"Recipe for Disaster - Another Cook's Quest", "Recipe for Disaster - Mountain Dwarf",
+			"Recipe for Disaster - Wartface & Bentnoze", "Recipe for Disaster - Pirate Pete",
+			"Recipe for Disaster - Lumbridge Guide", "Recipe for Disaster - Evil Dave",
+			"Recipe for Disaster - Skrach Uglogwee", "Recipe for Disaster - Sir Amik Varze",
+			"Recipe for Disaster - King Awowogei", "Recipe for Disaster - Culinaromancer");
+		Assert.assertEquals("Recipe for Disaster - Another Cook's Quest",
+			AdventureLog.matchQuest("You have completed Another Cook's Quest!", quests));
+		Assert.assertEquals("Recipe for Disaster - Another Cook's Quest",
+			AdventureLog.matchQuest("You have assisted the Lumbridge Cook... again!", quests));
+		Assert.assertEquals("Recipe for Disaster - Wartface & Bentnoze",
+			AdventureLog.matchQuest("You have freed the Goblin Generals!", quests));
+		Assert.assertEquals("Recipe for Disaster - Sir Amik Varze",
+			AdventureLog.matchQuest("You have freed Sir Amik Varze!", quests));
+		Assert.assertEquals("Recipe for Disaster - Skrach Uglogwee",
+			AdventureLog.matchQuest("You have freed Skrach 'Bone Crusher' Uglogwee!", quests));
+		Assert.assertEquals("Recipe for Disaster", AdventureLog.matchQuest("You have completed Recipe for Disaster!", quests));
+	}
+
+	@Test
+	public void petBroadcastsWithAClanNameAMilestoneOrNeither()
+	{
+		log.onGameMessage("You have a funny feeling like you're being followed.", NOW);
+		log.onClanMessage("[Iron Clan] Zezima has a funny feeling like he's being followed: Pet snakeling at 50 killcount.", "Zezima");
+		log.onTick(++tick);
+		JsonObject e = only(ticks(4), "pet");
+		Assert.assertEquals("[\"Pet snakeling\"]", e.getAsJsonArray("names").toString());
+		Assert.assertEquals("50 killcount", e.get("milestone").getAsString());
+
+		log.onGameMessage("You feel something weird sneaking into your backpack.", NOW);
+		log.onClanMessage("Zezima feels like she's acquired something special: Tumeken's guardian", "Zezima");
+		log.onTick(++tick);
+		e = only(ticks(4), "pet");
+		Assert.assertEquals("[\"Tumeken's guardian\"]", e.getAsJsonArray("names").toString());
+		Assert.assertNull(e.get("milestone"));
+	}
+
+	@Test
+	public void aHerbiboarHarvestCountIsACount()
+	{
+		tick("Your herbiboar harvest count is: 50.");
+		JsonObject e = only(ticks(2), "boss_kc");
+		Assert.assertEquals("herbiboar", e.get("boss").getAsString());
+		Assert.assertEquals(50, e.get("kc").getAsInt());
+	}
+
+	@Test
+	public void aTheatreRoomTimeIsNeverTheRaidsBest()
+	{
+		// The final room's message carries the room's time first, then the raid's.
+		tick("Wave 'The Final Challenge' (Normal Mode) complete!\nDuration: 7:42.60\n"
+			+ "Theatre of Blood completion time: 21:33.60 (new personal best)",
+			"Theatre of Blood total completion time: 25:28.80 (new personal best)");
+		tick("Your completed Theatre of Blood count is: 3.");
+		JsonObject e = only(ticks(2), "pb");
+		Assert.assertEquals("Theatre of Blood", e.get("boss").getAsString());
+		Assert.assertEquals("21:33.60", e.get("time").getAsString());
+
+		// A room that was its own best doesn't make the raid one.
+		tick("Wave 'The Final Challenge' (Normal Mode) complete!\nDuration: 4:00.00 (new personal best)\n"
+			+ "Theatre of Blood completion time: 21:40.20. Personal best: 21:33.60");
+		tick("Your completed Theatre of Blood count is: 4.");
+		for (JsonObject x : ticks(2))
+		{
+			Assert.assertNotEquals("pb", x.get("type").getAsString());
+		}
+	}
+
+	@Test
+	public void chestLootOverTheSettingIsLoggedAsDrops()
+	{
+		log.onChestLoot(Arrays.asList(
+			new AdventureLog.LootStack("Coins", 50_000, 50_000),
+			new AdventureLog.LootStack("Twisted bow", 1, 1_400_000_000L),
+			new AdventureLog.LootStack("Dragon arrow", 300, 1_200_000)), NOW);
+		List<JsonObject> out = log.drain();
+		Assert.assertEquals(2, out.size());
+		Assert.assertEquals("Twisted bow", out.get(0).get("item").getAsString());
+		Assert.assertEquals(300, out.get(1).get("qty").getAsInt());
+		Assert.assertEquals(1_200_000, out.get(1).get("value").getAsLong());
+
+		toggles.on.remove(AdventureLog.Category.DROPS);
+		log.onChestLoot(Collections.singletonList(new AdventureLog.LootStack("Twisted bow", 1, 1_400_000_000L)), NOW);
+		Assert.assertTrue(log.drain().isEmpty());
+	}
+
+	@Test
+	public void clueRewardsAreLootAndMilestonesAreClues()
+	{
+		toggles.on.remove(AdventureLog.Category.DROPS);
+		log.onGameMessage("You have completed 100 hard Treasure Trails.", NOW);
+		log.onClueReward(Collections.singletonList(new int[]{10350, 1}), 4_200_000L, NOW);
+		List<JsonObject> out = log.drain();
+		only(out, "clue_tier");
+		Assert.assertEquals(1, out.size());
+	}
+
+	@Test
 	public void aWorldHopForgetsHalfSeenFacts()
 	{
 		tick("You have a funny feeling like you're being followed.", "Your Zulrah kill count is: 100.");
