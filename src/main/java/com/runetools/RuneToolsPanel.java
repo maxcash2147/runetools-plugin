@@ -262,6 +262,12 @@ class RuneToolsPanel extends PluginPanel
 	private BiConsumer<GearSetup, Consumer<MissingResult>> missingComputer;
 
 	private final JPanel tradesSection = new JPanel();
+	private final JPanel timingSection = new JPanel();
+	private final JLabel timingStatus = new JLabel(" ");
+	private final JLabel timingDeadline = noHtml(new JLabel(" "));
+	private final JLabel timingSwitches = noHtml(new JLabel(" "));
+	private final JLabel timingPrayer = noHtml(new JLabel(" "));
+	private Runnable onOpenTiming;
 	private final JLabel sessionProfit = new JLabel("-");
 	private final JLabel offerSummary = new JLabel("No active GE offers");
 	private final JPanel recentTradesPanel = new JPanel();
@@ -401,6 +407,8 @@ class RuneToolsPanel extends PluginPanel
 		homeMenu.add(menuCard("Combat Achievements", "Tier progress, points & your plan", this::showCa));
 		homeMenu.add(Box.createVerticalStrut(8));
 		homeMenu.add(menuCard("Collection Log", "Sync a browsable replica to the site", this::showCollection));
+		homeMenu.add(Box.createVerticalStrut(8));
+		homeMenu.add(menuCard("Combat Timing", "Your real latency, switches & prayers", this::showTiming));
 
 		// Back bar for the sub-pages.
 		backBar.setLayout(new BorderLayout(6, 0));
@@ -422,6 +430,7 @@ class RuneToolsPanel extends PluginPanel
 		body.add(buildBankSection());
 		body.add(buildCaSection());
 		body.add(buildCollectionSection());
+		body.add(buildTimingSection());
 		JButton importIs = flatButton("Import from Inventory Setups");
 		importIs.setToolTipText("Paste a setup you exported from the Inventory Setups plugin to add it here.");
 		importIs.addActionListener(e -> doImportFromInventorySetups());
@@ -1358,6 +1367,7 @@ class RuneToolsPanel extends PluginPanel
 		bankSection.setVisible(false);
 		caSection.setVisible(false);
 		collectionSection.setVisible(false);
+		timingSection.setVisible(false);
 		setupsTools.setVisible(false);
 		overviewPanel.setVisible(false);
 		detailPanel.setVisible(false);
@@ -1376,6 +1386,7 @@ class RuneToolsPanel extends PluginPanel
 		bankSection.setVisible(false);
 		caSection.setVisible(false);
 		collectionSection.setVisible(false);
+		timingSection.setVisible(false);
 		setupsTools.setVisible(false);
 		overviewPanel.setVisible(false);
 		detailPanel.setVisible(false);
@@ -1394,6 +1405,7 @@ class RuneToolsPanel extends PluginPanel
 		bankSection.setVisible(true);
 		caSection.setVisible(false);
 		collectionSection.setVisible(false);
+		timingSection.setVisible(false);
 		setupsTools.setVisible(false);
 		overviewPanel.setVisible(false);
 		detailPanel.setVisible(false);
@@ -1412,6 +1424,7 @@ class RuneToolsPanel extends PluginPanel
 		bankSection.setVisible(false);
 		caSection.setVisible(true);
 		collectionSection.setVisible(false);
+		timingSection.setVisible(false);
 		setupsTools.setVisible(false);
 		overviewPanel.setVisible(false);
 		detailPanel.setVisible(false);
@@ -1430,6 +1443,26 @@ class RuneToolsPanel extends PluginPanel
 		bankSection.setVisible(false);
 		caSection.setVisible(false);
 		collectionSection.setVisible(true);
+		timingSection.setVisible(false);
+		setupsTools.setVisible(false);
+		overviewPanel.setVisible(false);
+		detailPanel.setVisible(false);
+		revalidate();
+		repaint();
+	}
+
+	private void showTiming()
+	{
+		current = null;
+		homeHeader.setVisible(false);
+		homeMenu.setVisible(false);
+		backBar.setVisible(true);
+		backTitle.setText("Combat Timing");
+		tradesSection.setVisible(false);
+		bankSection.setVisible(false);
+		caSection.setVisible(false);
+		collectionSection.setVisible(false);
+		timingSection.setVisible(true);
 		setupsTools.setVisible(false);
 		overviewPanel.setVisible(false);
 		detailPanel.setVisible(false);
@@ -1448,6 +1481,7 @@ class RuneToolsPanel extends PluginPanel
 		bankSection.setVisible(false);
 		caSection.setVisible(false);
 		collectionSection.setVisible(false);
+		timingSection.setVisible(false);
 		setupsTools.setVisible(true);
 		overviewPanel.setVisible(true);
 		detailPanel.setVisible(false);
@@ -1464,6 +1498,7 @@ class RuneToolsPanel extends PluginPanel
 		bankSection.setVisible(false);
 		caSection.setVisible(false);
 		collectionSection.setVisible(false);
+		timingSection.setVisible(false);
 		setupsTools.setVisible(false);
 		overviewPanel.setVisible(false);
 		detailPanel.setVisible(true);
@@ -1724,6 +1759,79 @@ class RuneToolsPanel extends PluginPanel
 				+ "the site.</html>");
 			clogTabsPanel.revalidate();
 			clogTabsPanel.repaint();
+		});
+	}
+
+	// -- Combat Timing section ------------------------------------------------- //
+
+	private JPanel buildTimingSection()
+	{
+		timingSection.setLayout(new BoxLayout(timingSection, BoxLayout.Y_AXIS));
+		timingSection.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+		JLabel cap = new JLabel("Combat Timing");
+		cap.setFont(cap.getFont().deriveFont(Font.BOLD, 13f));
+		cap.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+		JLabel blurb = new JLabel("<html>Measures how your real clicks land on game ticks: your latency "
+			+ "(the Ping to use in the RuneTools trainers), how often your gear switches land in one tick, "
+			+ "and your protection prayers against Jad and the Hunllef. Only totals are sent.</html>");
+		blurb.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		blurb.setAlignmentX(Component.LEFT_ALIGNMENT);
+		blurb.setBorder(BorderFactory.createEmptyBorder(6, 0, 8, 0));
+
+		timingStatus.setFont(timingStatus.getFont().deriveFont(Font.BOLD));
+		for (JLabel l : new JLabel[]{timingStatus, timingDeadline, timingSwitches, timingPrayer})
+		{
+			l.setAlignmentX(Component.LEFT_ALIGNMENT);
+			l.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
+		}
+		timingDeadline.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		timingSwitches.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		timingPrayer.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+
+		JButton open = new JButton("Open my timing on RuneTools ↗");
+		open.setAlignmentX(Component.LEFT_ALIGNMENT);
+		open.setToolTipText("Your measured timing on runetools.com, with links into the matching trainer drills");
+		open.addActionListener(e -> { if (onOpenTiming != null) { onOpenTiming.run(); } });
+
+		timingSection.add(cap);
+		timingSection.add(blurb);
+		timingSection.add(timingStatus);
+		timingSection.add(timingDeadline);
+		timingSection.add(timingSwitches);
+		timingSection.add(timingPrayer);
+		timingSection.add(Box.createVerticalStrut(8));
+		timingSection.add(open);
+		setTiming(false, null, null, null);
+		return timingSection;
+	}
+
+	void setOnOpenTiming(Runnable onOpenTiming)
+	{
+		this.onOpenTiming = onOpenTiming;
+	}
+
+	/** Refresh the Combat Timing section. {@code measuring} false shows how to turn it on. Any thread. */
+	void setTiming(boolean measuring, String deadline, String switches, String prayer)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			if (!measuring)
+			{
+				timingStatus.setText("<html>Off. Turn on <b>Measure combat timing</b> in the RuneTools "
+					+ "settings (consent and a connected character are needed too).</html>");
+				timingStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+				timingDeadline.setText(" ");
+				timingSwitches.setText(" ");
+				timingPrayer.setText(" ");
+				return;
+			}
+			timingStatus.setText("Measuring this session");
+			timingStatus.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
+			timingDeadline.setText(deadline != null ? deadline : " ");
+			timingSwitches.setText(switches != null ? switches : " ");
+			timingPrayer.setText(prayer != null ? prayer : " ");
 		});
 	}
 

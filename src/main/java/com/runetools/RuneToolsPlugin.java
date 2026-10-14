@@ -24,12 +24,16 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.inject.Inject;
 import javax.swing.JOptionPane;
 import javax.swing.SwingUtilities;
@@ -40,25 +44,32 @@ import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
+import net.runelite.api.HeadIcon;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
+import net.runelite.api.NPC;
 import net.runelite.api.Player;
+import net.runelite.api.Projectile;
 import net.runelite.api.ScriptID;
 import net.runelite.api.Skill;
 import net.runelite.api.WorldType;
+import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.ScriptPostFired;
 import net.runelite.api.events.ScriptPreFired;
 import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
+import net.runelite.api.gameval.AnimationID;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
+import net.runelite.api.gameval.SpotanimID;
 import net.runelite.api.gameval.SpriteID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.JavaScriptCallback;
@@ -86,6 +97,7 @@ import net.runelite.client.task.Schedule;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.util.LinkBrowser;
+import net.runelite.client.util.Text;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.OkHttpClient;
@@ -127,6 +139,36 @@ public class RuneToolsPlugin extends Plugin
 	private static final String EP_COMBAT_ACHIEVEMENTS = "combat-achievements";
 	private static final String EP_COLLECTION_LOG = "collection-log";
 	private static final String EP_BANK_LAYOUTS = "bank-layouts";
+	private static final String EP_TIMING = "timing";
+
+	// Combat timing (see CombatTiming). A session's totals go up at most this often while they change.
+	private static final long TIMING_SEND_GAP_MS = 30_000L;
+	private static final Set<String> EQUIP_OPTIONS = new HashSet<>(Arrays.asList("wield", "wear", "equip"));
+	// Jad's magic and ranged attack animations: TzTok-Jad in the Fight Caves (the cache calls him Lord
+	// Magmus), and JalTok-Jad in the Inferno and TzHaar-Ket-Rak's challenges. His melee, when you
+	// stand next to him, has no tell to read, so it isn't judged.
+	private static final Map<Integer, CombatTiming.Style> JAD_ATTACKS = new HashMap<>();
+	// The Hunllef's projectiles (normal and Corrupted). Its prayer-disabling attack is a magic attack.
+	private static final Map<Integer, CombatTiming.Style> HUNLLEF_PROJECTILES = new HashMap<>();
+
+	static
+	{
+		JAD_ATTACKS.put(AnimationID.LORDMAGMUS_FIRE, CombatTiming.Style.MAGIC);
+		JAD_ATTACKS.put(AnimationID.LORDMAGMUS_SMASH, CombatTiming.Style.RANGED);
+		JAD_ATTACKS.put(AnimationID.JALTOKJAD_ATTACK_MAGIC, CombatTiming.Style.MAGIC);
+		JAD_ATTACKS.put(AnimationID.JALTOKJAD_ATTACK_RANGED, CombatTiming.Style.RANGED);
+		HUNLLEF_PROJECTILES.put(SpotanimID.CRYSTAL_HUNLLEF_RANGE_TRAVEL, CombatTiming.Style.RANGED);
+		HUNLLEF_PROJECTILES.put(SpotanimID.CRYSTAL_HUNLLEF_RANGE_TRAVEL_HM, CombatTiming.Style.RANGED);
+		HUNLLEF_PROJECTILES.put(SpotanimID.CRYSTAL_HUNLLEF_MAGIC_TRAVEL, CombatTiming.Style.MAGIC);
+		HUNLLEF_PROJECTILES.put(SpotanimID.CRYSTAL_HUNLLEF_MAGIC_TRAVEL_HM, CombatTiming.Style.MAGIC);
+		HUNLLEF_PROJECTILES.put(SpotanimID.CRYSTAL_HUNLLEF_PRAYER_TRAVEL, CombatTiming.Style.MAGIC);
+		HUNLLEF_PROJECTILES.put(SpotanimID.CRYSTAL_HUNLLEF_PRAYER_TRAVEL_HM, CombatTiming.Style.MAGIC);
+	}
+
+	// "New item added to your collection log: Tanzanite fang" (tags removed first).
+	private static final Pattern CLOG_NEW_ITEM = Pattern.compile("New item added to your collection log: (.+)",
+		Pattern.CASE_INSENSITIVE);
+	private static final int MAX_CLOG_UNLOCKS = 50;
 
 	// The unsynced-trade queue is re-serialised into RuneLite's config on EVERY fill, so it can't be
 	// unbounded: a client left offline (or with a dead key) for weeks would otherwise grow a multi-MB
@@ -227,6 +269,24 @@ public class RuneToolsPlugin extends Plugin
 	// Bumped whenever the queues are discarded (someone else's log, logout, character switch), so a
 	// request already in flight can't put stale pages back after the fact.
 	private int clogGeneration;
+
+	// Collection-log items the game just announced in chat, each {name, ts}, waiting for the next
+	// collection-log sync. Tied to the identity that saw them, so they are never sent as anyone else.
+	private final List<JsonObject> clogUnlocks = new ArrayList<>();   // guarded by clogLock
+	private String clogUnlocksOwner;                                   // guarded by clogLock
+
+	// Combat timing. The tracker exists only while "Measure combat timing" is on for a connected,
+	// consenting character, so nothing is even measured otherwise. It is fed and read on the client
+	// thread; the send bookkeeping below is also touched by OkHttp callbacks.
+	private CombatTiming timing;
+	private String timingOwner;          // rsn|hash the session belongs to; a different character starts a new one
+	private boolean timingFresh;         // first tick of a session or after a hop: projectiles in flight aren't new
+	private int timingPanelRevision = -2;
+	private volatile long timingSentAt;
+	private volatile CombatTiming timingSentFor;
+	private volatile int timingSentRevision = -1;
+	// Hunllef projectiles already counted (weak, so finished projectiles fall out on their own).
+	private final Set<Projectile> seenProjectiles = Collections.newSetFromMap(new WeakHashMap<>());
 
 	private Widget dpsButton;   // our injected "RuneTools DPS" widget in the equipment interface (client thread only)
 
@@ -331,6 +391,7 @@ public class RuneToolsPlugin extends Plugin
 		// instead of waiting out the backoff.
 		panel.setOnOpened(() -> requestRemotePoll(PollSchedule.PANEL_GAP_MS));
 		panel.setMissingComputer(this::computeMissingItems);
+		panel.setOnOpenTiming(this::openTiming);
 		loadSpellbookIcons();
 		navButton = NavigationButton.builder()
 			.tooltip("RuneTools")
@@ -358,6 +419,11 @@ public class RuneToolsPlugin extends Plugin
 		// unregistered, so no logout is ever seen - without this, disabling, switching character and
 		// re-enabling would upload the previous character's pages under the new one's key.
 		discardCollectionCapture();
+		timing = null;   // a disabled plugin measures nothing; unsent timing totals are dropped
+		synchronized (clogLock)
+		{
+			clogUnlocks.clear();
+		}
 		navButton = null;
 		// Keep the panel reference: a late async upload callback may still touch it.
 	}
@@ -402,6 +468,13 @@ public class RuneToolsPlugin extends Plugin
 			if (e.getGameState() != GameState.HOPPING)
 			{
 				remotePoll.reset();
+			}
+			// The tick stream breaks here, so nothing in flight can be timed. The session itself carries
+			// on if the same character comes back (ensureTiming starts a new one for anyone else).
+			if (timing != null)
+			{
+				timing.interrupt();
+				timingFresh = true;
 			}
 		}
 	}
@@ -470,6 +543,17 @@ public class RuneToolsPlugin extends Plugin
 	public void onGameTick(GameTick e)
 	{
 		updateIdentity();
+		CombatTiming t = ensureTiming();
+		if (t != null)
+		{
+			t.onTick(monotonicMillis(), overheadStyle());
+			scanHunllefProjectiles(t);
+			timingFresh = false;
+			if (t.revision() != timingPanelRevision)
+			{
+				pushTimingPanel();
+			}
+		}
 		// A CA-completion chat message fired: resync now (a tick later, so the completion varp has
 		// settled) instead of waiting for the 20s scheduler.
 		if (caResyncPending)
@@ -590,7 +674,53 @@ public class RuneToolsPlugin extends Plugin
 			if (msg.contains("added to your collection log") && config.syncCollectionLog())
 			{
 				refreshCollectionTotals();
+				queueClogUnlock(e.getMessage());
 			}
+		}
+	}
+
+	/**
+	 * Remember the item a "New item added to your collection log" message names, with the time it
+	 * appeared, so the site's drop timeline shows it within a sync instead of the next time the log
+	 * is opened, and at the moment it actually happened. The site only accepts names the wiki lists in
+	 * the log. Client thread.
+	 */
+	private void queueClogUnlock(String message)
+	{
+		if (!collectionLogSyncOn() || !snapshot.get().hasIdentity())
+		{
+			return;
+		}
+		Matcher m = CLOG_NEW_ITEM.matcher(Text.removeTags(message != null ? message : ""));
+		if (!m.find())
+		{
+			return;
+		}
+		String name = m.group(1).trim();
+		while (name.endsWith("."))
+		{
+			name = name.substring(0, name.length() - 1).trim();
+		}
+		if (name.isEmpty() || name.length() > 80)
+		{
+			return;
+		}
+		JsonObject unlock = new JsonObject();
+		unlock.addProperty("name", name);
+		unlock.addProperty("ts", System.currentTimeMillis());
+		String owner = syncIdentity();
+		synchronized (clogLock)
+		{
+			if (!owner.equals(clogUnlocksOwner))
+			{
+				clogUnlocks.clear();   // anything still queued was another character's
+				clogUnlocksOwner = owner;
+			}
+			if (clogUnlocks.size() < MAX_CLOG_UNLOCKS)
+			{
+				clogUnlocks.add(unlock);
+			}
+			clogDirty = true;
 		}
 	}
 
@@ -738,6 +868,19 @@ public class RuneToolsPlugin extends Plugin
 		ItemContainer c = e.getItemContainer();
 		if (c == null)
 		{
+			return;
+		}
+		if (e.getContainerId() == InventoryID.WORN && timing != null)
+		{
+			Set<Integer> worn = new HashSet<>();
+			for (Item it : c.getItems())
+			{
+				if (it.getId() > 0)
+				{
+					worn.add(it.getId());
+				}
+			}
+			timing.onWornChanged(worn);
 			return;
 		}
 		if (e.getContainerId() == InventoryID.INV)
@@ -945,6 +1088,311 @@ public class RuneToolsPlugin extends Plugin
 		return arr;
 	}
 
+	// -- combat timing (client thread; see CombatTiming) ---------------------- //
+
+	/**
+	 * The tracker for the character logged in now, or null when measuring is off, unconsented or the
+	 * character isn't connected. Turning the setting off drops the tracker and anything it hadn't
+	 * sent; a different character starts a fresh session.
+	 */
+	private CombatTiming ensureTiming()
+	{
+		AccountSnapshot s = snapshot.get();
+		if (!config.syncTiming() || !s.hasIdentity() || !hasKeyAndConsent())
+		{
+			if (timing != null)
+			{
+				timing = null;
+				timingOwner = null;
+				pushTimingPanel();
+			}
+			return null;
+		}
+		String owner = s.rsn + '|' + s.accountHash;
+		if (timing == null || !owner.equals(timingOwner))
+		{
+			String session = UUID.randomUUID().toString().replace("-", "").substring(0, 20);
+			timing = new CombatTiming(session, System.currentTimeMillis());
+			timingOwner = owner;
+			timingFresh = true;
+			timingSentAt = 0L;
+		}
+		return timing;
+	}
+
+	/** One clock for every timing event; only differences between its readings are used. */
+	private static long monotonicMillis()
+	{
+		return System.nanoTime() / 1_000_000L;
+	}
+
+	/** The local player's overhead protection prayer as the server last sent it, or null. */
+	private CombatTiming.Style overheadStyle()
+	{
+		Player me = client.getLocalPlayer();
+		HeadIcon icon = me != null ? me.getOverheadIcon() : null;
+		if (icon == HeadIcon.MELEE)
+		{
+			return CombatTiming.Style.MELEE;
+		}
+		if (icon == HeadIcon.RANGED)
+		{
+			return CombatTiming.Style.RANGED;
+		}
+		if (icon == HeadIcon.MAGIC)
+		{
+			return CombatTiming.Style.MAGIC;
+		}
+		return null;
+	}
+
+	/**
+	 * Equip clicks from the inventory and clicks on the protection prayers (or the quick-prayer orb).
+	 * Only observed: the click is never changed, consumed or repeated.
+	 */
+	@Subscribe
+	public void onMenuOptionClicked(MenuOptionClicked e)
+	{
+		CombatTiming t = timing;
+		if (t == null || e.isConsumed())
+		{
+			return;   // not measuring, or another plugin stopped this click from happening
+		}
+		long now = monotonicMillis();
+		String option = Text.removeTags(e.getMenuOption() != null ? e.getMenuOption() : "").trim().toLowerCase();
+		int widget = e.getParam1();
+		if (widget == InterfaceID.Inventory.ITEMS && EQUIP_OPTIONS.contains(option))
+		{
+			timingEquipClick(t, now, e.getItemId());
+		}
+		else if (widget == InterfaceID.Orbs.PRAYERBUTTON)
+		{
+			t.onQuickPrayerClick();
+		}
+		else if (WidgetUtil.componentToInterface(widget) == InterfaceID.PRAYERBOOK
+			&& ("activate".equals(option) || "deactivate".equals(option)))
+		{
+			CombatTiming.Style style = protectionPrayer(e.getMenuTarget());
+			if (style != null)
+			{
+				t.onPrayerClick(now, style, "activate".equals(option), overheadStyle());
+			}
+		}
+	}
+
+	/** The style a prayer-book menu target protects from, if it is a protection prayer. */
+	private static CombatTiming.Style protectionPrayer(String target)
+	{
+		String name = Text.removeTags(target != null ? target : "").trim().toLowerCase();
+		switch (name)
+		{
+			case "protect from melee":
+				return CombatTiming.Style.MELEE;
+			case "protect from missiles":
+				return CombatTiming.Style.RANGED;
+			case "protect from magic":
+				return CombatTiming.Style.MAGIC;
+			default:
+				return null;
+		}
+	}
+
+	/** Hand an equip click to the tracker, with what it will replace (to describe the switch). */
+	private void timingEquipClick(CombatTiming t, long now, int itemId)
+	{
+		if (itemId <= 0)
+		{
+			return;
+		}
+		ItemStats stats = itemManager.getItemStats(itemId);
+		ItemEquipmentStats eq = stats != null && stats.isEquipable() ? stats.getEquipment() : null;
+		if (eq == null)
+		{
+			return;
+		}
+		ItemContainer worn = client.getItemContainer(InventoryID.WORN);
+		boolean alreadyWorn = worn != null && worn.contains(itemId);
+		List<Integer> replaces = new ArrayList<>(2);
+		replaces.add(wornId(worn, eq.getSlot()));
+		int shield = EquipmentInventorySlot.SHIELD.getSlotIdx();
+		int weapon = EquipmentInventorySlot.WEAPON.getSlotIdx();
+		if (eq.isTwoHanded())
+		{
+			replaces.add(wornId(worn, shield));     // a two-handed weapon takes the shield off too
+		}
+		else if (eq.getSlot() == shield)
+		{
+			int w = wornId(worn, weapon);
+			ItemStats ws = w > 0 ? itemManager.getItemStats(w) : null;
+			if (ws != null && ws.getEquipment() != null && ws.getEquipment().isTwoHanded())
+			{
+				replaces.add(w);                    // and a shield takes a two-handed weapon off
+			}
+		}
+		t.onEquipClick(now, itemId, alreadyWorn, replaces);
+	}
+
+	private static int wornId(ItemContainer worn, int slot)
+	{
+		Item it = worn != null ? worn.getItem(slot) : null;
+		return it != null ? it.getId() : -1;
+	}
+
+	/** A Jad starting a magic or ranged attack on the local player. */
+	@Subscribe
+	public void onAnimationChanged(AnimationChanged e)
+	{
+		CombatTiming t = timing;
+		if (t == null || !(e.getActor() instanceof NPC))
+		{
+			return;
+		}
+		NPC npc = (NPC) e.getActor();
+		CombatTiming.Style style = JAD_ATTACKS.get(npc.getAnimation());
+		Player me = client.getLocalPlayer();
+		if (style != null && me != null && npc.getInteracting() == me)
+		{
+			t.onJadAttack(npc.getIndex(), style);
+		}
+	}
+
+	/**
+	 * Hunllef attacks launched at the local player this tick: a projectile is created on the tick its
+	 * attack happens, so one first seen at this GameTick is this tick's attack. Right after a session
+	 * starts (or a hop) the ones already in flight are only marked as seen.
+	 */
+	private void scanHunllefProjectiles(CombatTiming t)
+	{
+		Player me = client.getLocalPlayer();
+		for (Projectile p : client.getProjectiles())
+		{
+			CombatTiming.Style style = HUNLLEF_PROJECTILES.get(p.getId());
+			if (style == null || !seenProjectiles.add(p))
+			{
+				continue;
+			}
+			if (!timingFresh && me != null && p.getTargetActor() == me)
+			{
+				t.onHunllefAttack(style);
+			}
+		}
+	}
+
+	/** Refresh the panel's Combat Timing section from the tracker. Client thread. */
+	private void pushTimingPanel()
+	{
+		if (panel == null)
+		{
+			return;
+		}
+		CombatTiming t = timing;
+		if (t == null)
+		{
+			timingPanelRevision = -2;
+			panel.setTiming(false, null, null, null);
+			return;
+		}
+		timingPanelRevision = t.revision();
+		int samples = t.samples();
+		int latency = t.latencyMs();
+		String deadline = latency >= 0
+			? "Click deadline: ~" + latency + " ms before the tick (" + samples + " clicks)"
+			: "Click deadline: " + samples + " clicks measured, " + CombatTiming.MIN_SAMPLES + "+ needed";
+		int n = t.switches();
+		String switches = n == 0
+			? "Gear switches: none yet this session"
+			: "Gear switches: " + Math.round(100f * t.oneTickSwitches() / n) + "% in one tick (" + n + ")";
+		StringBuilder prayer = new StringBuilder();
+		for (String fight : CombatTiming.FIGHTS)
+		{
+			int[] r = t.prayerResults(fight);
+			if (r == null || r[0] == 0)
+			{
+				continue;
+			}
+			if (prayer.length() > 0)
+			{
+				prayer.append(" · ");
+			}
+			String label = CombatTiming.TRIPLE.equals(fight) ? "Multi-Jad" : CombatTiming.HUNLLEF.equals(fight) ? "Hunllef" : "Jad";
+			prayer.append(label).append(' ').append(r[1]).append('/').append(r[0]).append(" blocked");
+		}
+		panel.setTiming(true, deadline, switches, prayer.length() > 0 ? "Prayer: " + prayer : "Prayer: no Jad or Hunllef attacks yet");
+	}
+
+	private void openTiming()
+	{
+		LinkBrowser.browse(api.base() + "/timing");
+	}
+
+	/**
+	 * Send this session's timing totals if they changed and the last send was a while ago. The body
+	 * is built on the client thread (where the tracker lives) and posted from there; the totals are
+	 * cumulative per session, so the server simply keeps the latest copy and a resend is harmless.
+	 */
+	private void syncTiming()
+	{
+		clientThread.invoke(() ->
+		{
+			final CombatTiming t = timing;
+			if (t == null || !syncAllowed())
+			{
+				return;
+			}
+			int rev = t.revision();
+			if (timingSentFor == t && timingSentRevision == rev)
+			{
+				return;   // nothing new since the last successful send
+			}
+			if (rev == 0)
+			{
+				return;   // nothing measured yet this session
+			}
+			long now = System.currentTimeMillis();
+			if (now - timingSentAt < TIMING_SEND_GAP_MS)
+			{
+				return;
+			}
+			final String identity = syncIdentity();
+			JsonObject body = t.report();
+			final long payload = body.toString().hashCode();
+			if (parking.isParked(EP_TIMING, identity, payload))
+			{
+				return;
+			}
+			stampIdentity(body);
+			body.addProperty("ts", now);
+			timingSentAt = now;
+			api.postTiming(body, new Callback()
+			{
+				@Override
+				public void onFailure(Call call, IOException ex)
+				{
+					noteSyncFailure();
+					log.debug("RuneTools: timing sync failed (will retry): {}", ex.getMessage());
+				}
+
+				@Override
+				public void onResponse(Call call, Response resp)
+				{
+					try (Response r = resp)
+					{
+						noteSyncResult(r, EP_TIMING, identity, payload);
+						if (r.isSuccessful())
+						{
+							timingSentFor = t;
+							timingSentRevision = rev;
+						}
+						else
+						{
+							log.debug("RuneTools: timing sync HTTP {}", r.code());
+						}
+					}
+				}
+			});
+		});
+	}
+
 	// -- upload (scheduler thread; OkHttp enqueue is async, never blocks) ---- //
 
 	@Schedule(period = 20, unit = ChronoUnit.SECONDS, asynchronous = true)
@@ -977,6 +1425,10 @@ public class RuneToolsPlugin extends Plugin
 		{
 			refreshCollectionTotals();   // keep overall progress fresh even if the log isn't open
 			syncCollectionLog();
+		}
+		if (config.syncTiming())
+		{
+			syncTiming();
 		}
 	}
 
@@ -1216,6 +1668,7 @@ public class RuneToolsPlugin extends Plugin
 		// moment a send failed.
 		final Map<String, JsonObject> sentPages = new LinkedHashMap<>();
 		final Map<String, Integer> sentHashes = new HashMap<>();
+		final List<JsonObject> sentUnlocks = new ArrayList<>();
 		final int generation;
 		final String identity = syncIdentity();
 		synchronized (clogLock)
@@ -1231,6 +1684,12 @@ public class RuneToolsPlugin extends Plugin
 			generation = clogGeneration;
 			totals = clogTotals;
 			obtained = clogObtained;
+			// Announced items go only as the character that saw them; anyone else's are dropped.
+			if (identity.equals(clogUnlocksOwner))
+			{
+				sentUnlocks.addAll(clogUnlocks);
+			}
+			clogUnlocks.clear();
 			for (Map.Entry<String, JsonObject> en : clogChanged.entrySet())
 			{
 				sentPages.put(en.getKey(), en.getValue());
@@ -1247,7 +1706,7 @@ public class RuneToolsPlugin extends Plugin
 			clogDirty = false;
 		}
 		List<JsonObject> pages = new ArrayList<>(sentPages.values());
-		if (totals == null && pages.isEmpty() && obtained == null)
+		if (totals == null && pages.isEmpty() && obtained == null && sentUnlocks.isEmpty())
 		{
 			return;
 		}
@@ -1270,6 +1729,16 @@ public class RuneToolsPlugin extends Plugin
 		{
 			body.add("obtained", obtained);
 		}
+		// Items the game announced since the last sync, with when: they reach the drop timeline at once.
+		if (!sentUnlocks.isEmpty())
+		{
+			JsonArray unlocks = new JsonArray();
+			for (JsonObject u : sentUnlocks)
+			{
+				unlocks.add(u);
+			}
+			body.add("new_items", unlocks);
+		}
 		final JsonArray sentObtained = obtained;
 		final long payload = body.toString().hashCode();
 		if (parking.isParked(EP_COLLECTION_LOG, identity, payload))
@@ -1277,6 +1746,7 @@ public class RuneToolsPlugin extends Plugin
 			// The server already refused exactly this. Keep it queued, unsent: a newly-read page
 			// changes the payload and earns another try.
 			requeueCollectionPages(generation, sentPages, sentHashes, sentObtained);
+			requeueUnlocks(identity, sentUnlocks);
 			return;
 		}
 		api.postCollectionLog(body, new Callback()
@@ -1285,6 +1755,7 @@ public class RuneToolsPlugin extends Plugin
 			public void onFailure(Call call, IOException ex)
 			{
 				requeueCollectionPages(generation, sentPages, sentHashes, sentObtained);
+				requeueUnlocks(identity, sentUnlocks);
 				noteSyncFailure();
 				log.debug("RuneTools: collection-log sync failed (will retry): {}", ex.getMessage());
 			}
@@ -1305,6 +1776,10 @@ public class RuneToolsPlugin extends Plugin
 					else
 					{
 						requeueCollectionPages(generation, sentPages, sentHashes, sentObtained);
+						if (r.code() != 400 && r.code() != 413)
+						{
+							requeueUnlocks(identity, sentUnlocks);   // a refused body won't improve by resending
+						}
 						log.debug("RuneTools: collection-log sync HTTP {}", r.code());
 					}
 				}
@@ -1351,6 +1826,31 @@ public class RuneToolsPlugin extends Plugin
 			{
 				clogObtained = obtained;
 			}
+			clogDirty = true;
+		}
+	}
+
+	/**
+	 * Put announced items back after a failed send, ahead of any announced since, as long as the same
+	 * character is still the one queuing them.
+	 */
+	private void requeueUnlocks(String identity, List<JsonObject> unlocks)
+	{
+		if (unlocks.isEmpty())
+		{
+			return;
+		}
+		synchronized (clogLock)
+		{
+			if (clogUnlocksOwner != null && !identity.equals(clogUnlocksOwner))
+			{
+				return;   // someone else is playing now: these were never theirs to send
+			}
+			clogUnlocksOwner = identity;
+			List<JsonObject> merged = new ArrayList<>(unlocks);
+			merged.addAll(clogUnlocks);
+			clogUnlocks.clear();
+			clogUnlocks.addAll(merged.subList(0, Math.min(merged.size(), MAX_CLOG_UNLOCKS)));
 			clogDirty = true;
 		}
 	}

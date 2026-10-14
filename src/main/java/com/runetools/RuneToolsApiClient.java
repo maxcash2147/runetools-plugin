@@ -295,6 +295,13 @@ class RuneToolsApiClient
 			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
 	}
 
+	/** Push this session's combat-timing totals ({@link CombatTiming#report()} plus identity). */
+	void postTiming(JsonObject body, Callback callback)
+	{
+		http.newCall(authed("/api/plugin/timing")
+			.post(RequestBody.create(JSON, body.toString())).build()).enqueue(callback);
+	}
+
 	/** Pull the user's bank layouts (incl. ones imported on the site). A matching {@code etag} -> 304. */
 	void getBankLayouts(String etag, Callback callback)
 	{

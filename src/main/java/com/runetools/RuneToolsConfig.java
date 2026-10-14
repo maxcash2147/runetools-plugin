@@ -70,14 +70,16 @@ public interface RuneToolsConfig extends Config
 			+ "character is yours (the site checks it against the official hiscores).\n"
 			+ "- Your Combat Achievements (the task list and which tasks you have completed), for the "
 			+ "site's planner.\n"
-			+ "- Your Collection Log progress counts, and the items you have obtained when you open "
-			+ "the log in-game, for a browsable copy of your log on the site.\n"
+			+ "- Your Collection Log progress counts, the items you have obtained when you open "
+			+ "the log in-game, and the name and time of each new item the game announces, for a "
+			+ "browsable copy of your log and your drop timeline on the site.\n"
 			+ "- A gear setup's worn gear, inventory, rune pouch, quiver and spellbook, when you save "
 			+ "or update that setup.\n"
 			+ "- A bank tab's item layout, only when you export it to share it.\n"
 			+ "- Your bank contents, only if you turn on \"Include bank\".\n"
+			+ "- Combat timing totals, only if you turn on \"Measure combat timing\" (see that setting).\n"
 			+ "Nothing else is sent. The automatic syncs can each be switched off under \"What to "
-			+ "sync\" and \"Gear setups\".\n"
+			+ "sync\", \"Gear setups\" and \"Combat timing\".\n"
 			// The Plugin Hub requires this sentence, near enough verbatim, on any config item that
 			// turns on a third-party-server feature. Without it the plugin fails review.
 			+ "This feature submits your IP address to a 3rd-party server not controlled or verified "
@@ -168,7 +170,9 @@ public interface RuneToolsConfig extends Config
 			+ "progress syncs while you play. Each time you open your own Collection Log in-game, the "
 			+ "plugin asks the game once for the whole log (the same request the log's Search button "
 			+ "makes; nothing changes on screen), and the pages you look at add their names and exact "
-			+ "quantities. Only works once you have consented and connected this character.",
+			+ "quantities. When the game announces a new item in chat (\"New item added to your collection "
+			+ "log\"), its name and the time go to your drop timeline straight away. Only works once you "
+			+ "have consented and connected this character.",
 		section = setupsSection,
 		position = 2
 	)
@@ -199,5 +203,38 @@ public interface RuneToolsConfig extends Config
 	default boolean setupBankLayout()
 	{
 		return true;
+	}
+
+	@ConfigSection(
+		name = "Combat timing",
+		description = "Measure your real latency, gear switches and protection prayers for the site's trainers",
+		position = 3
+	)
+	String timingSection = "timing";
+
+	@ConfigItem(
+		keyName = "syncTiming",
+		name = "Measure combat timing",
+		description = "Measure how your real clicks land on game ticks and show it on runetools.com/timing: "
+			+ "your effective latency (the Ping to use in the trainers), how often your gear switches land in "
+			+ "one tick, and your protection prayers against Jad and the Hunllef. Only totals are sent.",
+		// Shown when the setting is turned on. Keep in step with CombatTiming.report() and the README.
+		warning = "With this on, while you play the plugin watches your equip clicks, your clicks on the "
+			+ "protection prayers, your overhead prayer and the attacks Jad and the Hunllef aim at you. "
+			+ "About once a minute it sends RuneTools only these totals for the session:\n"
+			+ "- How many of those clicks landed on the next game tick or one tick later, counted in 20 ms "
+			+ "steps by how long before the tick they were made (this is how your latency is worked out).\n"
+			+ "- How many gear switches you made, how many landed in one tick, and their average time from "
+			+ "first to last click, by number of items, plus the item ids of your three most repeated switches.\n"
+			+ "- For Jad, multi-Jad fights and the Hunllef: how many attacks you prayed against in time, "
+			+ "one tick late, with the wrong prayer or with none.\n"
+			+ "No single click, its time or where you clicked is ever sent. Nothing is measured or sent while "
+			+ "this is off, and turning it off drops anything not yet sent.",
+		section = timingSection,
+		position = 0
+	)
+	default boolean syncTiming()
+	{
+		return false;
 	}
 }
