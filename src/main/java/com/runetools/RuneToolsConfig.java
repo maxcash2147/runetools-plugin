@@ -207,7 +207,7 @@ public interface RuneToolsConfig extends Config
 
 	@ConfigSection(
 		name = "Combat timing",
-		description = "Measure your real latency, gear switches and protection prayers for the site's trainers",
+		description = "Measure your real latency and protection prayers for the site's trainers",
 		position = 3
 	)
 	String timingSection = "timing";
@@ -216,16 +216,14 @@ public interface RuneToolsConfig extends Config
 		keyName = "syncTiming",
 		name = "Measure combat timing",
 		description = "Measure how your real clicks land on game ticks and show it on runetools.com/timing: "
-			+ "your effective latency (the Ping to use in the trainers), how often your gear switches land in "
-			+ "one tick, and your protection prayers against Jad and the Hunllef. Only totals are sent.",
+			+ "your effective latency (the Ping to use in the trainers) and your protection prayers against "
+			+ "Jad and the Hunllef. Only totals are sent.",
 		// Shown when the setting is turned on. Keep in step with CombatTiming.report() and the README.
 		warning = "With this on, while you play the plugin watches your equip clicks, your clicks on the "
 			+ "protection prayers, your overhead prayer and the attacks Jad and the Hunllef aim at you. "
 			+ "About once a minute it sends RuneTools only these totals for the session:\n"
 			+ "- How many of those clicks landed on the next game tick or one tick later, counted in 20 ms "
 			+ "steps by how long before the tick they were made (this is how your latency is worked out).\n"
-			+ "- How many gear switches you made, how many landed in one tick, and their average time from "
-			+ "first to last click, by number of items, plus the item ids of your three most repeated switches.\n"
 			+ "- For Jad, multi-Jad fights and the Hunllef: how many attacks you prayed against in time, "
 			+ "one tick late, with the wrong prayer or with none.\n"
 			+ "No single click, its time or where you clicked is ever sent. Nothing is measured or sent while "

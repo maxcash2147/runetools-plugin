@@ -23,8 +23,8 @@ your real data instead of numbers you type in.
   calculator with the gear you have on.
 - **Combat timing** (off until you turn on **Measure combat timing**). Measures how your real clicks
   land on game ticks: your effective latency (the Ping to set in the site's Prayer and Gear Switch
-  trainers), how often your gear switches land in one tick, and whether your protection prayers beat
-  Jad and the Hunllef. The side panel shows it as you play, and
+  trainers) and whether your protection prayers beat Jad and the Hunllef. The side panel shows it
+  as you play, and
   [runetools.com/timing](https://runetools.com/timing) links each weak spot to the drill that trains it.
 - **Live drop timeline.** When the game announces a new Collection Log item, it reaches your profile's
   drop timeline within a minute, stamped with when you got it, without opening the log.
@@ -80,7 +80,7 @@ which is also where a key is revoked.
 | Combat Achievements (task list + completion) | when they change | the site's CA planner |
 | Collection Log progress counts, your complete obtained set, and the items on pages you open | counts while playing; the obtained set when you open the log in-game | a browsable collection-log replica |
 | The name of each new Collection Log item the game announces in chat, and when | with the next sync after the message (Sync Collection Log on) | your profile's drop timeline, at the time you got it |
-| Combat timing totals for the session (see [How combat timing is measured](#how-combat-timing-is-measured)) | about every 30 seconds while they change, only with **Measure combat timing** on | your real latency, switch and prayer stats on runetools.com/timing |
+| Combat timing totals for the session (see [How combat timing is measured](#how-combat-timing-is-measured)) | about every 30 seconds while they change, only with **Measure combat timing** on | your real latency and prayer stats on runetools.com/timing |
 | A gear setup's worn gear, inventory, rune pouch, quiver & spellbook | when you save or update that setup | two-way gear-setup sync |
 | A bank tab's item layout | only when you export a tab to share it | publish a shareable bank layout to your profile |
 | Bank contents | only if you enable **Include bank**, and only when you open the bank | holdings P/L, best-loadout-from-bank |
@@ -140,17 +140,13 @@ The client processes everything the server sends for a tick and only then announ
   back on that tick or the one after. Clicks made later than your latency before a tick miss it, so
   the boundary between the two groups is your latency, in the sense the trainers use "ping".
   Ticks that arrive irregularly (lag spikes, the first tick after a hop) are skipped.
-- **Gear switches.** Equip clicks under 400 ms apart are one switch; it is a 1-tick switch when every
-  item came back on the same tick.
 - **Prayers.** Jad's attack is decided 3 ticks after his animation starts (after your input on that
   tick); the Hunllef checks the prayer that was up at the start of its attack tick. Each attack is
   counted as blocked, one tick late, the wrong prayer, or no prayer. These are the same rules the site's
   Prayer Trainer drills.
 
 What is sent, about every 30 seconds while it changes, is only the session's running totals: hit and
-miss counts in 20 ms buckets, switch counts and average first-to-last-click times by number of items,
-the item ids of your three most repeated switches (so the site can set up that exact switch in the
-trainer), and the prayer counts per fight. No single click, its time or position is sent. Turning the
+miss counts in 20 ms buckets, and the prayer counts per fight. No single click, its time or position is sent. Turning the
 setting off stops all measuring and drops anything not yet sent.
 
 ## Build & run (development)

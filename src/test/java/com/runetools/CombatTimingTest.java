@@ -1,9 +1,7 @@
 package com.runetools;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -41,11 +39,10 @@ public class CombatTimingTest
 		}
 
 		/** Equip an item at {@code ms} after the last tick appeared. */
-		void equip(int itemId, long ms, Integer replaces)
+		void equip(int itemId, long ms)
 		{
 			long at = tickTime(k) + ms;
-			t.onEquipClick(at, itemId, worn.contains(itemId),
-				replaces != null ? Collections.singletonList(replaces) : Collections.emptyList());
+			t.onEquipClick(at, itemId, worn.contains(itemId));
 			int land = (int) Math.ceil((at + latency - 10_000L) / (double) TICK);
 			inFlight.add(new long[]{itemId, land});
 		}
@@ -92,7 +89,7 @@ public class CombatTimingTest
 		{
 			for (int ms = 5; ms < TICK; ms += 15)
 			{
-				s.equip(item++, ms, null);
+				s.equip(item++, ms);
 				s.ticks(3);
 			}
 		}
@@ -141,72 +138,27 @@ public class CombatTimingTest
 	}
 
 	@Test
-	public void aSwitchWhoseItemsAllLandTogetherIsOneTick()
+	public void everyEquipThatLandsIsALatencySample()
 	{
 		Sim s = new Sim(60);
 		s.tick();
-		for (int rep = 0; rep < 2; rep++)
-		{
-			s.worn.removeAll(java.util.Arrays.asList(11, 12, 13));
-			s.equip(11, 100, 1);
-			s.equip(12, 180, 2);
-			s.equip(13, 260, 3);
-			s.ticks(4);
-		}
-		Assert.assertEquals(2, s.t.switches());
-		Assert.assertEquals(2, s.t.oneTickSwitches());
-
-		JsonObject sw = s.t.report().getAsJsonObject("switches");
-		JsonArray sizes = sw.getAsJsonArray("sizes");
-		Assert.assertEquals(1, sizes.size());
-		JsonObject three = sizes.get(0).getAsJsonObject();
-		Assert.assertEquals(3, three.get("items").getAsInt());
-		Assert.assertEquals(2, three.get("one").getAsInt());
-		Assert.assertEquals(320, three.get("span_ms").getAsLong());   // 160 ms first to last, twice
-
-		JsonArray top = sw.getAsJsonArray("top");
-		Assert.assertEquals(1, top.size());
-		JsonObject combo = top.get(0).getAsJsonObject();
-		Assert.assertEquals("[11,12,13]", combo.getAsJsonArray("to").toString());
-		Assert.assertEquals("[1,2,3]", combo.getAsJsonArray("from").toString());
-		Assert.assertEquals(2, combo.get("n").getAsInt());
-	}
-
-	@Test
-	public void aSwitchThatSpillsIntoTheNextTickIsNot()
-	{
-		Sim s = new Sim(60);
-		s.tick();
-		s.equip(21, 300, null);
-		s.equip(22, 560, null);      // past 600 - 60: lands a tick after the first
-		s.ticks(4);
-		Assert.assertEquals(1, s.t.switches());
-		Assert.assertEquals(0, s.t.oneTickSwitches());
-	}
-
-	@Test
-	public void aSwitchWithAnEquipThatNeverHappenedIsNotCounted()
-	{
-		Sim s = new Sim(60);
-		s.tick();
-		s.equip(31, 100, null);
-		long at = s.tickTime(s.k) + 150;
-		s.t.onEquipClick(at, 32, false, Collections.emptyList());   // e.g. a level requirement
-		s.ticks(6);
-		Assert.assertEquals(0, s.t.switches());
-	}
-
-	@Test
-	public void clicksFarApartAreSeparateEquipsNotOneSwitch()
-	{
-		Sim s = new Sim(60);
-		s.tick();
-		s.equip(41, 50, null);
+		s.equip(41, 50);
 		s.ticks(2);
-		s.equip(42, 50, null);
+		s.equip(42, 50);
 		s.ticks(4);
-		Assert.assertEquals(0, s.t.switches());     // two single equips
-		Assert.assertEquals(2, s.t.samples());       // still two latency samples
+		Assert.assertEquals(2, s.t.samples());
+	}
+
+	@Test
+	public void anEquipThatNeverHappensIsNotASample()
+	{
+		Sim s = new Sim(60);
+		s.tick();
+		s.equip(31, 100);
+		long at = s.tickTime(s.k) + 150;
+		s.t.onEquipClick(at, 32, false);   // e.g. a level requirement: it never shows up worn
+		s.ticks(6);
+		Assert.assertEquals(1, s.t.samples());
 	}
 
 	@Test
@@ -214,7 +166,7 @@ public class CombatTimingTest
 	{
 		Sim s = new Sim(60);
 		s.tick();
-		s.equip(51, 100, null);
+		s.equip(51, 100);
 		// The next tick shows up 900 ms after the last (a lag spike).
 		s.k++;
 		s.worn.add(51);
@@ -333,7 +285,7 @@ public class CombatTimingTest
 	{
 		Sim s = new Sim(60);
 		s.tick();
-		s.equip(61, 100, null);
+		s.equip(61, 100);
 		s.t.onJadAttack(3, CombatTiming.Style.MAGIC);
 		s.t.interrupt();
 		s.ticks(6);
@@ -346,10 +298,10 @@ public class CombatTimingTest
 	{
 		Sim s = new Sim(60);
 		s.tick();
-		s.equip(71, 100, null);
+		s.equip(71, 100);
 		s.ticks(3);
 		JsonObject r = s.t.report();
-		Assert.assertEquals(new HashSet<>(java.util.Arrays.asList("v", "session", "started", "latency", "switches", "prayer")),
+		Assert.assertEquals(new HashSet<>(java.util.Arrays.asList("v", "session", "started", "latency", "prayer")),
 			r.keySet());
 		JsonObject lat = r.getAsJsonObject("latency");
 		Assert.assertEquals(CombatTiming.BIN_MS, lat.get("bin_ms").getAsInt());

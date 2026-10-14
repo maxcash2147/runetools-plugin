@@ -10,11 +10,10 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeSet;
 
 /**
  * Measures the player's real combat timing from what the client already shows them, for the
- * "My timing" page on the site and the trainers it links into. Three measurements:
+ * "My timing" page on the site and the trainers it links into. Two measurements:
  *
  * <ol>
  *   <li><b>Click deadline</b> (effective latency). For every equip click, and every click that turns
@@ -23,8 +22,6 @@ import java.util.TreeSet;
  *   latency before a tick misses it, so the boundary between the hits and the misses is your
  *   latency, in exactly the sense the site's trainers use for "ping": the last N ms of every tick on
  *   your screen already belong to the next one.</li>
- *   <li><b>Gear switches.</b> Equip clicks less than {@value #SWITCH_GAP_MS} ms apart form one switch.
- *   A switch whose items all came back on the same tick is a 1-tick switch.</li>
  *   <li><b>Protection prayers at Jad and the Hunllef</b>, judged by the rules the Prayer Trainer
  *   teaches: Jad's attack is decided 3 ticks after his animation starts, after your input on that
  *   tick; the Hunllef checks the prayer that was up at the start of its attack tick.</li>
@@ -36,8 +33,8 @@ import java.util.TreeSet;
  * second one, and what is read AT a GameTick is the state at the end of that tick.
  *
  * <p>Only aggregates ever leave this class ({@link #report()}): counts in {@value #BIN_MS} ms
- * buckets, switch counts and prayer results. No single click, its time or what was clicked is kept
- * beyond the few ticks it takes to resolve, except the item ids of the switches you repeat most.
+ * buckets and prayer results. No single click, its time or what was clicked is kept beyond the few
+ * ticks it takes to resolve.
  *
  * <p>Pure (no RuneLite types) so it can be unit tested. The plugin feeds it on the client thread and
  * it is not thread-safe.
@@ -53,16 +50,9 @@ final class CombatTiming
 	static final int TICK_MS = 600;
 	static final int BIN_MS = 20;
 	static final int BINS = TICK_MS / BIN_MS;
-	/** Equip clicks further apart than this start a new switch. */
-	static final long SWITCH_GAP_MS = 400;
 	/** Samples needed (with at least {@link #MIN_EACH} hits and misses) before a latency is estimated. */
 	static final int MIN_SAMPLES = 30;
 	static final int MIN_EACH = 3;
-	/** Switch sizes past this are pooled with it ("8 or more items"). */
-	static final int MAX_SWITCH_ITEMS = 8;
-	/** Distinct switches remembered per session, and how many of the most-used are reported. */
-	static final int MAX_COMBOS = 40;
-	static final int TOP_COMBOS = 3;
 	/** Another Jad attacking within this many ticks makes it a multi-Jad fight (triple Jads are 9 apart). */
 	static final int TRIPLE_WINDOW_TICKS = 27;
 	/** The fights whose protection prayers are judged, as the site and the Prayer Trainer name them. */
@@ -85,46 +75,12 @@ final class CombatTiming
 		final int nextTick;         // the first tick the click could land on
 		long phase = -1;            // ms from the click to that tick appearing; -1 = unknown or unusable
 		int landedTick = -1;        // the tick its item showed up worn
-		boolean done;
-		boolean failed;             // never landed (requirements, no space, ...)
 
 		Click(long at, int itemId, int nextTick)
 		{
 			this.at = at;
 			this.itemId = itemId;
 			this.nextTick = nextTick;
-		}
-	}
-
-	/** One gear switch: a burst of equip clicks. */
-	private static final class Swap
-	{
-		final long first;
-		long last;
-		final List<Click> clicks = new ArrayList<>();
-		final TreeSet<Integer> to = new TreeSet<>();
-		final TreeSet<Integer> from = new TreeSet<>();
-
-		Swap(long first)
-		{
-			this.first = first;
-			this.last = first;
-		}
-	}
-
-	/** A switch the player repeats, keyed by the items it puts on. */
-	private static final class Combo
-	{
-		final List<Integer> from;
-		final List<Integer> to;
-		int n;
-		int one;
-		long spanSum;
-
-		Combo(List<Integer> from, List<Integer> to)
-		{
-			this.from = from;
-			this.to = to;
 		}
 	}
 
@@ -173,14 +129,6 @@ final class CombatTiming
 	private final int[] miss = new int[BINS];
 
 	private final List<Click> clicks = new ArrayList<>();
-	private Swap open;
-	private final List<Swap> closing = new ArrayList<>();
-	private int switches;
-	private int oneTick;
-	private final int[] sizeN = new int[MAX_SWITCH_ITEMS + 1];
-	private final int[] sizeOne = new int[MAX_SWITCH_ITEMS + 1];
-	private final long[] sizeSpan = new long[MAX_SWITCH_ITEMS + 1];
-	private final Map<String, Combo> combos = new LinkedHashMap<>();
 
 	private PrayerClick pendingPrayer;
 	private final List<Attack> attacks = new ArrayList<>();
@@ -232,21 +180,14 @@ final class CombatTiming
 		}
 		resolveClicks();
 		resolvePrayerClick(now, overhead, regular);
-		if (open != null && now - open.last > SWITCH_GAP_MS)
-		{
-			closing.add(open);
-			open = null;
-		}
-		finishSwitches();
 		gradeAttacks();
 	}
 
 	/**
 	 * The player clicked to equip {@code itemId} from the inventory. {@code alreadyWorn}: an identical
 	 * item is worn already (a stackable top-up), which can't be told apart from its own landing.
-	 * {@code replaces}: what is worn in the slots it will take, to describe the switch.
 	 */
-	void onEquipClick(long now, int itemId, boolean alreadyWorn, Collection<Integer> replaces)
+	void onEquipClick(long now, int itemId, boolean alreadyWorn)
 	{
 		if (itemId <= 0 || alreadyWorn || lastTickAt < 0)
 		{
@@ -255,8 +196,8 @@ final class CombatTiming
 		for (Click c : clicks)
 		{
 			// Clicking an item again before it lands sends the old slot contents a second time, which
-			// the server ignores: not a second sample, and not a second item in the switch.
-			if (!c.done && c.itemId == itemId && c.landedTick < 0)
+			// the server ignores: not a second sample.
+			if (c.itemId == itemId && c.landedTick < 0)
 			{
 				return;
 			}
@@ -265,28 +206,7 @@ final class CombatTiming
 		clicks.add(c);
 		if (clicks.size() > MAX_PENDING)
 		{
-			clicks.remove(0).done = true;
-		}
-		if (open == null || now - open.last > SWITCH_GAP_MS)
-		{
-			if (open != null)
-			{
-				closing.add(open);
-			}
-			open = new Swap(now);
-		}
-		open.last = now;
-		open.clicks.add(c);
-		open.to.add(itemId);
-		if (replaces != null)
-		{
-			for (Integer id : replaces)
-			{
-				if (id != null && id > 0)
-				{
-					open.from.add(id);
-				}
-			}
+			clicks.remove(0);
 		}
 	}
 
@@ -295,7 +215,7 @@ final class CombatTiming
 	{
 		for (Click c : clicks)
 		{
-			if (!c.done && c.landedTick < 0 && wornIds.contains(c.itemId))
+			if (c.landedTick < 0 && wornIds.contains(c.itemId))
 			{
 				c.landedTick = tick + 1;   // seen before this tick's GameTick
 			}
@@ -358,14 +278,7 @@ final class CombatTiming
 	 */
 	void interrupt()
 	{
-		for (Click c : clicks)
-		{
-			c.done = true;
-			c.failed = true;
-		}
 		clicks.clear();
-		open = null;
-		closing.clear();
 		pendingPrayer = null;
 		attacks.clear();
 		jadLastAttack.clear();
@@ -389,14 +302,11 @@ final class CombatTiming
 				{
 					sample(c.phase, late == 0);
 				}
-				c.done = true;
 				it.remove();
 			}
 			else if (c.landedTick < 0 && tick >= c.nextTick + 3)
 			{
-				c.done = true;
-				c.failed = true;
-				it.remove();
+				it.remove();   // never landed (requirements, no space, ...)
 			}
 		}
 	}
@@ -443,87 +353,6 @@ final class CombatTiming
 			miss[bin]++;
 		}
 		revision++;
-	}
-
-	private void finishSwitches()
-	{
-		for (Iterator<Swap> it = closing.iterator(); it.hasNext(); )
-		{
-			Swap s = it.next();
-			boolean pending = false;
-			boolean failed = false;
-			int min = Integer.MAX_VALUE;
-			int max = Integer.MIN_VALUE;
-			for (Click c : s.clicks)
-			{
-				if (!c.done)
-				{
-					pending = true;
-					break;
-				}
-				if (c.failed || c.landedTick < 0)
-				{
-					failed = true;
-				}
-				else
-				{
-					min = Math.min(min, c.landedTick);
-					max = Math.max(max, c.landedTick);
-				}
-			}
-			if (pending)
-			{
-				continue;
-			}
-			it.remove();
-			// One item isn't a switch, and a switch with an equip that never happened can't be timed.
-			if (s.clicks.size() < 2 || failed)
-			{
-				continue;
-			}
-			boolean one = max == min;
-			long span = s.last - s.first;
-			int size = Math.min(MAX_SWITCH_ITEMS, s.clicks.size());
-			switches++;
-			sizeN[size]++;
-			sizeSpan[size] += span;
-			if (one)
-			{
-				oneTick++;
-				sizeOne[size]++;
-			}
-			remember(s, one, span);
-			revision++;
-		}
-	}
-
-	private void remember(Swap s, boolean one, long span)
-	{
-		String key = s.to.toString();
-		Combo c = combos.get(key);
-		if (c == null)
-		{
-			if (combos.size() >= MAX_COMBOS)
-			{
-				return;
-			}
-			List<Integer> from = new ArrayList<>();
-			for (Integer id : s.from)
-			{
-				if (!s.to.contains(id))
-				{
-					from.add(id);
-				}
-			}
-			c = new Combo(from, new ArrayList<>(s.to));
-			combos.put(key, c);
-		}
-		c.n++;
-		c.spanSum += span;
-		if (one)
-		{
-			c.one++;
-		}
 	}
 
 	private void gradeAttacks()
@@ -656,16 +485,6 @@ final class CombatTiming
 		return s;
 	}
 
-	int switches()
-	{
-		return switches;
-	}
-
-	int oneTickSwitches()
-	{
-		return oneTick;
-	}
-
 	/** {attacks, blocked, late, wrong, none} for a fight, or null if none were seen. */
 	int[] prayerResults(String fight)
 	{
@@ -689,44 +508,6 @@ final class CombatTiming
 		lat.add("hit", ints(hit));
 		lat.add("miss", ints(miss));
 		o.add("latency", lat);
-
-		JsonObject sw = new JsonObject();
-		sw.addProperty("n", switches);
-		sw.addProperty("one", oneTick);
-		JsonArray sizes = new JsonArray();
-		for (int i = 2; i <= MAX_SWITCH_ITEMS; i++)
-		{
-			if (sizeN[i] == 0)
-			{
-				continue;
-			}
-			JsonObject s = new JsonObject();
-			s.addProperty("items", i);
-			s.addProperty("n", sizeN[i]);
-			s.addProperty("one", sizeOne[i]);
-			s.addProperty("span_ms", sizeSpan[i]);
-			sizes.add(s);
-		}
-		sw.add("sizes", sizes);
-		List<Combo> ranked = new ArrayList<>(combos.values());
-		ranked.sort((a, b) -> Integer.compare(b.n, a.n));
-		JsonArray top = new JsonArray();
-		for (Combo c : ranked)
-		{
-			if (top.size() >= TOP_COMBOS || c.n < 2)
-			{
-				break;
-			}
-			JsonObject t = new JsonObject();
-			t.add("from", ints(c.from));
-			t.add("to", ints(c.to));
-			t.addProperty("n", c.n);
-			t.addProperty("one", c.one);
-			t.addProperty("span_ms", c.spanSum);
-			top.add(t);
-		}
-		sw.add("top", top);
-		o.add("switches", sw);
 
 		JsonObject pr = new JsonObject();
 		for (String fight : FIGHTS)
@@ -752,16 +533,6 @@ final class CombatTiming
 	{
 		JsonArray arr = new JsonArray();
 		for (int v : a)
-		{
-			arr.add(v);
-		}
-		return arr;
-	}
-
-	private static JsonArray ints(List<Integer> a)
-	{
-		JsonArray arr = new JsonArray();
-		for (Integer v : a)
 		{
 			arr.add(v);
 		}

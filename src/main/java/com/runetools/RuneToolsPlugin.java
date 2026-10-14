@@ -1197,7 +1197,7 @@ public class RuneToolsPlugin extends Plugin
 		}
 	}
 
-	/** Hand an equip click to the tracker, with what it will replace (to describe the switch). */
+	/** Hand an equip click to the tracker (a latency sample once it lands). */
 	private void timingEquipClick(CombatTiming t, long now, int itemId)
 	{
 		if (itemId <= 0)
@@ -1212,30 +1212,7 @@ public class RuneToolsPlugin extends Plugin
 		}
 		ItemContainer worn = client.getItemContainer(InventoryID.WORN);
 		boolean alreadyWorn = worn != null && worn.contains(itemId);
-		List<Integer> replaces = new ArrayList<>(2);
-		replaces.add(wornId(worn, eq.getSlot()));
-		int shield = EquipmentInventorySlot.SHIELD.getSlotIdx();
-		int weapon = EquipmentInventorySlot.WEAPON.getSlotIdx();
-		if (eq.isTwoHanded())
-		{
-			replaces.add(wornId(worn, shield));     // a two-handed weapon takes the shield off too
-		}
-		else if (eq.getSlot() == shield)
-		{
-			int w = wornId(worn, weapon);
-			ItemStats ws = w > 0 ? itemManager.getItemStats(w) : null;
-			if (ws != null && ws.getEquipment() != null && ws.getEquipment().isTwoHanded())
-			{
-				replaces.add(w);                    // and a shield takes a two-handed weapon off
-			}
-		}
-		t.onEquipClick(now, itemId, alreadyWorn, replaces);
-	}
-
-	private static int wornId(ItemContainer worn, int slot)
-	{
-		Item it = worn != null ? worn.getItem(slot) : null;
-		return it != null ? it.getId() : -1;
+		t.onEquipClick(now, itemId, alreadyWorn);
 	}
 
 	/** A Jad starting a magic or ranged attack on the local player. */
@@ -1289,7 +1266,7 @@ public class RuneToolsPlugin extends Plugin
 		if (t == null)
 		{
 			timingPanelRevision = -2;
-			panel.setTiming(false, null, null, null);
+			panel.setTiming(false, null, null);
 			return;
 		}
 		timingPanelRevision = t.revision();
@@ -1298,10 +1275,6 @@ public class RuneToolsPlugin extends Plugin
 		String deadline = latency >= 0
 			? "Click deadline: ~" + latency + " ms before the tick (" + samples + " clicks)"
 			: "Click deadline: " + samples + " clicks measured, " + CombatTiming.MIN_SAMPLES + "+ needed";
-		int n = t.switches();
-		String switches = n == 0
-			? "Gear switches: none yet this session"
-			: "Gear switches: " + Math.round(100f * t.oneTickSwitches() / n) + "% in one tick (" + n + ")";
 		StringBuilder prayer = new StringBuilder();
 		for (String fight : CombatTiming.FIGHTS)
 		{
@@ -1317,7 +1290,7 @@ public class RuneToolsPlugin extends Plugin
 			String label = CombatTiming.TRIPLE.equals(fight) ? "Multi-Jad" : CombatTiming.HUNLLEF.equals(fight) ? "Hunllef" : "Jad";
 			prayer.append(label).append(' ').append(r[1]).append('/').append(r[0]).append(" blocked");
 		}
-		panel.setTiming(true, deadline, switches, prayer.length() > 0 ? "Prayer: " + prayer : "Prayer: no Jad or Hunllef attacks yet");
+		panel.setTiming(true, deadline, prayer.length() > 0 ? "Prayer: " + prayer : "Prayer: no Jad or Hunllef attacks yet");
 	}
 
 	private void openTiming()
