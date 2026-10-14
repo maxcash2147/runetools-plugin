@@ -5,10 +5,6 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.inject.Provides;
-import java.awt.Color;
-import java.awt.Font;
-import java.awt.Graphics2D;
-import java.awt.RenderingHints;
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
 import java.awt.image.BufferedImage;
@@ -98,6 +94,7 @@ import net.runelite.client.plugins.banktags.tabs.TabManager;
 import net.runelite.client.task.Schedule;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.LinkBrowser;
 import net.runelite.client.util.Text;
 import okhttp3.Call;
@@ -3890,19 +3887,8 @@ public class RuneToolsPlugin extends Plugin
 
 	private static BufferedImage icon()
 	{
-		// Gold "R" on dark stone with a gold bevel - matches the Plugin Hub icon.png + the runetools.com theme.
-		BufferedImage img = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
-		Graphics2D g = img.createGraphics();
-		g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-		g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-		g.setColor(new Color(0x22, 0x1E, 0x16));
-		g.fillRoundRect(0, 0, 16, 16, 5, 5);
-		g.setColor(new Color(0xC9, 0xA2, 0x4A));
-		g.drawRoundRect(0, 0, 15, 15, 5, 5);
-		g.setColor(new Color(0xF3, 0xCB, 0x5C));
-		g.setFont(new Font("SansSerif", Font.BOLD, 12));
-		g.drawString("R", 4, 12);
-		g.dispose();
-		return img;
+		// The RuneTools rune (a gold R on a rune stone), the same mark as the Plugin Hub icon.png and
+		// runetools.com. Built from the site's master by ge-trader/scripts/build_brand_icons.py.
+		return ImageUtil.loadImageResource(RuneToolsPlugin.class, "nav_icon.png");
 	}
 }
