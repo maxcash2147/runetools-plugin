@@ -81,7 +81,7 @@ which is also where a key is revoked.
 |---|---|---|
 | RSN + account hash + a capture timestamp | with every sync | link the character to your site account |
 | Completed GE fills (item, buy/sell, qty, unit price, time) | as they fill | automatic P/L tracking |
-| Coins (in your inventory and, once you open your bank, your banked coins), free GE slots, open GE offers, inventory, members-world flag | when they change while playing | bankroll- and slot-aware flip suggestions |
+| Coins (in your inventory and, once you open your bank, your banked coins), free GE slots, open GE offers, inventory, the gear you're wearing, members-world flag | when they change while playing | bankroll- and slot-aware flip suggestions, and best-in-slot from the gear you own |
 | Skill levels & experience | when they change while playing | level-aware calculators (BIS, DPS, skills), and proving the character is yours: the server compares the exact XP with the official hiscores before any synced data is shown publicly under that name |
 | Combat Achievements (task list + completion) | when they change | the site's CA planner |
 | Collection Log progress counts, your complete obtained set, and the items on pages you open | counts while playing; the obtained set when you open the log in-game | a browsable collection-log replica |

@@ -23,6 +23,9 @@ final class AccountSnapshot
 	// null until the bank is captured (Include-bank on + bank opened this session), so a sync never
 	// uploads an empty bank that would overwrite a previously-synced one.
 	final JsonArray bank;
+	// null until captured: what the character is wearing, which is owned gear too (best-in-slot
+	// "from my bank" counts it), sent with the same keep-the-last-one rule as the bank.
+	final JsonArray equipment;
 	// null until captured; {skill: {level, xp}}. Feeds the site's level-aware calculators, and the
 	// exact XP is how the server proves this account plays the in-game name it syncs under.
 	final JsonObject skills;
@@ -37,6 +40,7 @@ final class AccountSnapshot
 		offers = b.offers;
 		inventory = b.inventory;
 		bank = b.bank;
+		equipment = b.equipment;
 		skills = b.skills;
 	}
 
@@ -65,6 +69,7 @@ final class AccountSnapshot
 		private JsonArray offers = new JsonArray();
 		private JsonArray inventory = new JsonArray();
 		private JsonArray bank;
+		private JsonArray equipment;
 		private JsonObject skills;
 
 		private Builder()
@@ -81,6 +86,7 @@ final class AccountSnapshot
 			offers = s.offers;
 			inventory = s.inventory;
 			bank = s.bank;
+			equipment = s.equipment;
 			skills = s.skills;
 		}
 
@@ -129,6 +135,12 @@ final class AccountSnapshot
 		Builder bank(JsonArray v)
 		{
 			bank = v;
+			return this;
+		}
+
+		Builder equipment(JsonArray v)
+		{
+			equipment = v;
 			return this;
 		}
 

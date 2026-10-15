@@ -29,6 +29,11 @@ public class StateBodyTest
 		coins.addProperty("item_id", 995);
 		coins.addProperty("qty", 1000L);
 		bank.add(coins);
+		JsonArray worn = new JsonArray();
+		JsonObject fang = new JsonObject();
+		fang.addProperty("item_id", 26219);
+		fang.addProperty("qty", 1);
+		worn.add(fang);
 		return AccountSnapshot.empty().toBuilder()
 			.rsn("Zezima")
 			.accountHash("123456789")
@@ -36,6 +41,7 @@ public class StateBodyTest
 			.gp(1000L)
 			.freeSlots(8)
 			.bank(bank)
+			.equipment(worn)
 			.skills(skills)
 			.build();
 	}
@@ -46,6 +52,7 @@ public class StateBodyTest
 		JsonObject body = RuneToolsApiClient.stateBody(full());
 		Set<String> expected = new HashSet<>(ALWAYS);
 		expected.add("bank");
+		expected.add("equipment");
 		expected.add("skills");
 		Assert.assertEquals(expected, body.keySet());
 	}
@@ -61,7 +68,7 @@ public class StateBodyTest
 	}
 
 	@Test
-	public void uncapturedBankAndSkillsAreLeftOutSoTheServerKeepsItsCopy()
+	public void uncapturedBankEquipmentAndSkillsAreLeftOutSoTheServerKeepsItsCopy()
 	{
 		AccountSnapshot s = AccountSnapshot.empty().toBuilder().rsn("Zezima").accountHash("1").build();
 		JsonObject body = RuneToolsApiClient.stateBody(s);

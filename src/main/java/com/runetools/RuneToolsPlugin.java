@@ -1042,17 +1042,27 @@ public class RuneToolsPlugin extends Plugin
 		{
 			return;
 		}
-		if (e.getContainerId() == InventoryID.WORN && timing != null)
+		if (e.getContainerId() == InventoryID.WORN)
 		{
-			Set<Integer> worn = new HashSet<>();
-			for (Item it : c.getItems())
+			if (timing != null)
 			{
-				if (it.getId() > 0)
+				Set<Integer> worn = new HashSet<>();
+				for (Item it : c.getItems())
 				{
-					worn.add(it.getId());
+					if (it.getId() > 0)
+					{
+						worn.add(it.getId());
+					}
 				}
+				timing.onWornChanged(worn);
 			}
-			timing.onWornChanged(worn);
+			// What the character wears is owned gear too (best-in-slot "from my bank" counts it).
+			final JsonArray eq = itemsToArray(c);
+			if (!eq.equals(snapshot.get().equipment))
+			{
+				snapshot.updateAndGet(s -> s.toBuilder().equipment(eq).build());
+				stateDirty.set(true);
+			}
 			return;
 		}
 		if (e.getContainerId() == InventoryID.INV)
@@ -1195,10 +1205,13 @@ public class RuneToolsPlugin extends Plugin
 			bankArr = config.syncBank() ? itemsToArray(bank) : null;
 		}
 		final JsonArray bankJson = bankArr;
+		ItemContainer worn = client.getItemContainer(InventoryID.WORN);
+		final JsonArray wornArr = worn != null ? itemsToArray(worn) : null;
 		final long gp = (long) inventoryCoins + (long) bankCoins;
 		snapshot.updateAndGet(s -> s.toBuilder()
 			.inventory(invArr != null ? invArr : s.inventory)
 			.bank(bankJson != null ? bankJson : s.bank)
+			.equipment(wornArr != null ? wornArr : s.equipment)
 			.gp(gp)
 			.build());
 		rebuildOffers();

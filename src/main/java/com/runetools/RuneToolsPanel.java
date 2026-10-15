@@ -770,6 +770,7 @@ class RuneToolsPanel extends PluginPanel
 
 	private void openSetup(GearSetup s)
 	{
+		onOpened.run();   // as above: an edit made on the site shows up within seconds
 		current = s;
 		String title = s.getName() != null ? s.getName() : "Setup";
 		detailTitle.setText(title);
@@ -1481,6 +1482,7 @@ class RuneToolsPanel extends PluginPanel
 
 	private void showSetups()
 	{
+		onOpened.run();   // about to use the setups: fetch any edits made on the site (rate-limited)
 		current = null;
 		homeHeader.setVisible(false);
 		homeMenu.setVisible(false);
@@ -2022,7 +2024,10 @@ class RuneToolsPanel extends PluginPanel
 		return String.format("%,d", v);
 	}
 
-	/** Run when the player opens this side panel (the plugin uses it to fetch fresh setups). */
+	/**
+	 * Run when the player opens this side panel, the Gear Setups section or a setup (the plugin uses
+	 * it to fetch fresh setups, at most once every few seconds).
+	 */
 	void setOnOpened(Runnable r)
 	{
 		onOpened = r != null ? r : () -> { };

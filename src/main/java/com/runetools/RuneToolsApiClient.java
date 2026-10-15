@@ -345,6 +345,11 @@ class RuneToolsApiClient
 		{
 			body.add("bank", s.bank);
 		}
+		// Worn equipment likewise.
+		if (s.equipment != null)
+		{
+			body.add("equipment", s.equipment);
+		}
 		// Same preserve-if-absent contract for skills.
 		if (s.skills != null)
 		{
