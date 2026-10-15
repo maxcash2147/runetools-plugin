@@ -220,8 +220,9 @@ class RuneToolsPanel extends PluginPanel
 	}
 
 	// status/linked carry server-supplied strings (display name, linked RSNs) - disable Swing's
-	// auto-HTML so a "<html><img src=...>" value can't beacon the user's IP (see noHtml()).
-	private final JLabel status = noHtml(new JLabel("Not connected"));
+	// auto-HTML so a "<html><img src=...>" value can't beacon the user's IP (see noHtml()). The status
+	// line is the exception: it needs HTML to wrap, so every message is escaped first (wrapped()).
+	private final JLabel status = new JLabel(wrapped("Not connected", STATUS_WIDTH));
 	private final JLabel linked = noHtml(new JLabel(" "));
 	private final JLabel pending = new JLabel("0 unsynced trades");
 	private final JLabel lastSync = new JLabel("Last sync: never");
@@ -244,8 +245,8 @@ class RuneToolsPanel extends PluginPanel
 	private volatile Runnable onOpened = () -> { };
 
 	private final JPanel bankSection = new JPanel();
-	// bankStatus echoes imported-layout names (server-supplied) - keep it plain-text only.
-	private final JLabel bankStatus = noHtml(new JLabel(" "));
+	// bankStatus echoes imported-layout names (server-supplied): escaped before it is shown (wrapped()).
+	private final JLabel bankStatus = new JLabel(" ");
 
 	private final JPanel caSection = new JPanel();
 	private final JLabel caOverall = new JLabel("Waiting for a Combat Achievements read…");
@@ -337,14 +338,22 @@ class RuneToolsPanel extends PluginPanel
 		blurb.setAlignmentX(Component.LEFT_ALIGNMENT);
 		blurb.setBorder(BorderFactory.createEmptyBorder(3, 0, 0, 0));
 
-		JPanel rows = new JPanel(new GridLayout(0, 1, 0, 4));
+		// Stacked rather than a grid, so a status message that wraps onto a second line gets the room.
+		JPanel rows = new JPanel();
+		rows.setLayout(new BoxLayout(rows, BoxLayout.Y_AXIS));
 		rows.setBorder(BorderFactory.createEmptyBorder(10, 0, 6, 0));
 		status.setFont(status.getFont().deriveFont(Font.BOLD));
 		pending.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		lastSync.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		rows.add(status);
-		rows.add(pending);
-		rows.add(lastSync);
+		for (JLabel row : new JLabel[]{status, pending, lastSync})
+		{
+			row.setAlignmentX(Component.LEFT_ALIGNMENT);
+			if (rows.getComponentCount() > 0)
+			{
+				rows.add(Box.createVerticalStrut(4));
+			}
+			rows.add(row);
+		}
 		rows.setAlignmentX(Component.LEFT_ALIGNMENT);
 
 		signIn = flatButton("Open RuneTools  ↗");
@@ -1309,7 +1318,6 @@ class RuneToolsPanel extends PluginPanel
 		card.setOpaque(true);
 		card.setBackground(ColorScheme.DARKER_GRAY_COLOR);
 		card.setBorder(BorderFactory.createEmptyBorder(11, 12, 11, 12));
-		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 62));
 		card.setAlignmentX(Component.LEFT_ALIGNMENT);
 		card.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
 
@@ -1320,7 +1328,7 @@ class RuneToolsPanel extends PluginPanel
 		t.setFont(t.getFont().deriveFont(Font.BOLD, 14f));
 		t.setForeground(ColorScheme.BRAND_ORANGE);
 		t.setAlignmentX(Component.LEFT_ALIGNMENT);
-		JLabel sub = new JLabel(subtitle);
+		JLabel sub = new JLabel(wrapped(subtitle, CARD_TEXT_WIDTH));   // wraps instead of being cut off
 		sub.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		sub.setAlignmentX(Component.LEFT_ALIGNMENT);
 		textCol.add(t);
@@ -1333,6 +1341,8 @@ class RuneToolsPanel extends PluginPanel
 
 		card.add(textCol, BorderLayout.CENTER);
 		card.add(chev, BorderLayout.EAST);
+		// As tall as its text (a subtitle may wrap), never stretched by the menu's BoxLayout.
+		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, card.getPreferredSize().height));
 		card.addMouseListener(new MouseAdapter()
 		{
 			@Override
@@ -1609,7 +1619,7 @@ class RuneToolsPanel extends PluginPanel
 	{
 		SwingUtilities.invokeLater(() ->
 		{
-			bankStatus.setText(text);
+			bankStatus.setText(wrapped(text, STATUS_WIDTH));
 			bankStatus.setForeground(ok ? ColorScheme.PROGRESS_COMPLETE_COLOR : ColorScheme.PROGRESS_ERROR_COLOR);
 		});
 	}
@@ -2030,11 +2040,10 @@ class RuneToolsPanel extends PluginPanel
 	{
 		SwingUtilities.invokeLater(() ->
 		{
-			status.setText("●  " + text);   // leading dot picks up the status colour (green ok / red not)
+			// leading dot picks up the status colour (green ok / red not); long messages wrap
+			status.setText(wrapped("●  " + (text != null ? text : ""), STATUS_WIDTH));
 			status.setForeground(ok ? ColorScheme.PROGRESS_COMPLETE_COLOR : ColorScheme.PROGRESS_ERROR_COLOR);
-			// The line is clipped to the panel width, so the full message is in the tooltip too. Plain
-			// text only, keeping the no-HTML rule the label itself follows.
-			status.setToolTipText(text != null && text.indexOf('<') < 0 ? text : null);
+			status.setToolTipText(null);
 		});
 	}
 
@@ -2178,6 +2187,24 @@ class RuneToolsPanel extends PluginPanel
 	 * unescaped server-supplied string in a label is a remote-image (IP-leak) beacon. Use this for
 	 * every label that ever shows a string that originated on the server.
 	 */
+	// Wrapping widths for HTML labels, inside the panel's 205px of content: the status lines, and a
+	// home-menu card's subtitle beside its chevron.
+	private static final int STATUS_WIDTH = 185;
+	private static final int CARD_TEXT_WIDTH = 155;
+
+	/**
+	 * Plain text as a label that wraps at {@code width} px instead of being cut off. The text is
+	 * escaped, so a server-supplied message is shown as text and can never become markup.
+	 */
+	private static String wrapped(String text, int width)
+	{
+		if (text == null || text.trim().isEmpty())
+		{
+			return " ";
+		}
+		return "<html><div style='width:" + width + "px'>" + htmlEscape(text) + "</div></html>";
+	}
+
 	private static JLabel noHtml(JLabel label)
 	{
 		label.putClientProperty("html.disable", Boolean.TRUE);
