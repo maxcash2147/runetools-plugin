@@ -242,6 +242,8 @@ class RuneToolsPanel extends PluginPanel
 	private final Runnable onRemoveTabs;
 	private final Consumer<String> onConvertTab;
 	private final Runnable onExportTag;
+	private volatile Runnable onShareBank = () -> { };
+	private volatile Runnable onRemoveImportedBank = () -> { };
 	private volatile Runnable onOpened = () -> { };
 
 	private final JPanel bankSection = new JPanel();
@@ -1598,6 +1600,30 @@ class RuneToolsPanel extends PluginPanel
 			}
 		});
 
+		JPanel wholeSep = new JPanel();
+		wholeSep.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
+		wholeSep.setPreferredSize(new Dimension(10, 1));
+		wholeSep.setBackground(ColorScheme.MEDIUM_GRAY_COLOR);
+		wholeSep.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+		JLabel wholeBlurb = new JLabel("<html><b>Whole bank layouts.</b> Share every tab of your bank at "
+			+ "once, placeholders included. Import someone's from runetools.com/layouts and it appears "
+			+ "here as their tabs, plus a <b>Misc</b> tab for anything you own that their layout doesn't "
+			+ "place. Nothing in your bank is moved.</html>");
+		wholeBlurb.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		wholeBlurb.setAlignmentX(Component.LEFT_ALIGNMENT);
+		wholeBlurb.setBorder(BorderFactory.createEmptyBorder(10, 0, 8, 0));
+
+		JButton shareBank = new JButton("Share my whole bank layout");
+		shareBank.setAlignmentX(Component.LEFT_ALIGNMENT);
+		shareBank.setToolTipText("Publish all your bank tabs as one layout others can import");
+		shareBank.addActionListener(e -> onShareBank.run());
+
+		JButton removeImported = new JButton("Remove imported bank tabs");
+		removeImported.setAlignmentX(Component.LEFT_ALIGNMENT);
+		removeImported.setToolTipText("Delete the tabs made by the last whole bank layout you imported");
+		removeImported.addActionListener(e -> onRemoveImportedBank.run());
+
 		bankStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		bankStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
 		bankStatus.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
@@ -1613,6 +1639,12 @@ class RuneToolsPanel extends PluginPanel
 		bankSection.add(convert);
 		bankSection.add(Box.createVerticalStrut(6));
 		bankSection.add(export);
+		bankSection.add(Box.createVerticalStrut(12));
+		bankSection.add(wholeSep);
+		bankSection.add(wholeBlurb);
+		bankSection.add(shareBank);
+		bankSection.add(Box.createVerticalStrut(6));
+		bankSection.add(removeImported);
 		bankSection.add(bankStatus);
 		return bankSection;
 	}
@@ -2028,6 +2060,13 @@ class RuneToolsPanel extends PluginPanel
 	 * Run when the player opens this side panel, the Gear Setups section or a setup (the plugin uses
 	 * it to fetch fresh setups, at most once every few seconds).
 	 */
+	/** What "Share my whole bank layout" and "Remove imported bank tabs" do. */
+	void setBankLayoutActions(Runnable share, Runnable removeImported)
+	{
+		this.onShareBank = share;
+		this.onRemoveImportedBank = removeImported;
+	}
+
 	void setOnOpened(Runnable r)
 	{
 		onOpened = r != null ? r : () -> { };

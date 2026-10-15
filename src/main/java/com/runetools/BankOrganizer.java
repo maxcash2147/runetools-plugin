@@ -2,11 +2,13 @@ package com.runetools;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.IntUnaryOperator;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
@@ -36,10 +38,12 @@ class BankOrganizer
 	private static final String GROUP = RuneToolsConfig.GROUP;
 	private static final String KEY_OWNED = "organizedTabs";
 	private static final String KEY_FILED = "organizedFiledItems";   // ids we've filed (for File-new)
+	private static final String KEY_IMPORTED_BANK = "importedBankTabs";   // tabs of the last whole-bank import
 	private static final String ALL_TAG = "All";   // a full-bank tab shown before the category tabs
 	// Core Bank Tags config: the ordered CSV of tag-tab names the bank rebuilds its tab bar from.
 	private static final int COLS = 8;
 	private static final int MAX_LAYOUT_CELLS = 4096;   // hard cap on an imported layout's grid size
+	static final int BANK_FILLER = 20594;               // holds a bank slot open; never a real item
 
 	private final BankTagsService bankTags;
 	private final TagManager tagManager;
@@ -468,34 +472,207 @@ class BankOrganizer
 			// Never destructively overwrite a tab the user (or the organiser) already owns: an
 			// imported layout reusing an existing tag name gets a fresh, non-colliding name instead.
 			String tag = uniqueTagName(base);
-			// Cap grid size on untrusted imports (the caller also bounds it).
-			int[] safe = cells.length > MAX_LAYOUT_CELLS ? Arrays.copyOf(cells, MAX_LAYOUT_CELLS) : cells.clone();
-			int first = -1;
-			tagManager.removeTag(tag);
-			for (int i = 0; i < safe.length; i++)
-			{
-				int id = safe[i];
-				if (id > 0 && plausibleItemId(id))
-				{
-					int c = itemManager.canonicalize(id);
-					tagManager.addTag(c, tag, false);
-					safe[i] = c;
-					if (first < 0)
-					{
-						first = c;
-					}
-				}
-				else
-				{
-					safe[i] = -1;   // drop implausible ids rather than write junk keys into banktags config
-				}
-			}
-			layoutManager.saveLayout(new Layout(tag, safe));
-			int safeIcon = (icon > 0 && plausibleItemId(icon)) ? icon : first;
-			ensureTab(tag, safeIcon);
+			makeTab(tag, icon, cells, null);
 			tabManager.save();
 			log.debug("RuneTools: applied imported layout \"{}\"", tag);
 		});
+	}
+
+	/**
+	 * Tag {@code tag} with the items of an untrusted positional layout (index = grid position, value =
+	 * item id, -1 = empty), save the layout and make sure the tab exists. Adds every item placed to
+	 * {@code placed} when given. Returns false when the layout held no usable item.
+	 */
+	private boolean makeTab(String tag, int icon, int[] cells, Set<Integer> placed)
+	{
+		// Cap grid size on untrusted imports (the caller also bounds it).
+		int[] safe = cells.length > MAX_LAYOUT_CELLS ? Arrays.copyOf(cells, MAX_LAYOUT_CELLS) : cells.clone();
+		int first = -1;
+		tagManager.removeTag(tag);
+		for (int i = 0; i < safe.length; i++)
+		{
+			int id = safe[i];
+			if (id > 0 && plausibleItemId(id) && id != BANK_FILLER)
+			{
+				int c = itemManager.canonicalize(id);
+				tagManager.addTag(c, tag, false);
+				safe[i] = c;
+				if (placed != null)
+				{
+					placed.add(c);
+				}
+				if (first < 0)
+				{
+					first = c;
+				}
+			}
+			else
+			{
+				safe[i] = -1;   // drop implausible ids rather than write junk keys into banktags config
+			}
+		}
+		if (first < 0)
+		{
+			return false;
+		}
+		layoutManager.saveLayout(new Layout(tag, safe));
+		ensureTab(tag, (icon > 0 && plausibleItemId(icon)) ? icon : first);
+		return true;
+	}
+
+	/** One tab of a whole bank layout imported from the site. */
+	static final class BankTab
+	{
+		final String name;
+		final int icon;
+		final int[] cells;   // index = grid position, value = item id, -1 = empty
+
+		BankTab(String name, int icon, int[] cells)
+		{
+			this.name = name;
+			this.icon = icon;
+			this.cells = cells;
+		}
+	}
+
+	/**
+	 * Apply a whole bank layout imported from the site: one Bank Tags tab per shared tab, in its order
+	 * and at the front of the tab bar, then a <b>Misc</b> tab with everything in this bank (placeholders
+	 * included) that the layout doesn't place. Replaces the tabs of the previous whole-bank import and,
+	 * like every tab here, moves nothing in the real bank. Call on the client thread with this
+	 * character's bank contents; returns a status line.
+	 */
+	String applyImportedBank(String name, List<BankTab> tabs, List<Integer> bankItemIds)
+	{
+		clearImportedBank();
+		String prefix = sanitizeTagName(name);
+		if (prefix.length() > 24)
+		{
+			prefix = prefix.substring(0, 24).trim();
+		}
+		if (prefix.isEmpty())
+		{
+			prefix = "Imported";
+		}
+		List<String> made = new ArrayList<>();
+		Set<Integer> placed = new HashSet<>();
+		for (BankTab t : tabs)
+		{
+			String tag = uniqueTagName(sanitizeTagName(prefix + " " + sanitizeTagName(t.name)));
+			if (t.cells != null && t.cells.length > 0 && makeTab(tag, t.icon, t.cells, placed))
+			{
+				made.add(tag);
+			}
+		}
+		List<Integer> misc = unplaced(bankItemIds, placed, itemManager::canonicalize);
+		if (!misc.isEmpty())
+		{
+			String tag = uniqueTagName(sanitizeTagName(prefix + " Misc"));
+			if (makeTab(tag, -1, packGroups(Collections.singletonList(misc)), null))
+			{
+				made.add(tag);
+			}
+		}
+		reorderLiveTabsFirst(made);
+		tabManager.save();
+		configManager.setConfiguration(GROUP, KEY_IMPORTED_BANK, String.join(",", made));
+		if (!made.isEmpty())
+		{
+			bankTags.openBankTag(made.get(0), BankTagsService.OPTION_ALLOW_MODIFICATIONS);
+		}
+		log.debug("RuneTools: applied imported bank \"{}\" as {} tab(s)", prefix, made.size());
+		int laidOut = made.size() - (misc.isEmpty() ? 0 : 1);
+		return "Imported \"" + prefix + "\": " + laidOut + " tab" + (laidOut == 1 ? "" : "s")
+			+ (misc.isEmpty() ? "" : ", plus Misc with " + misc.size() + " item" + (misc.size() == 1 ? "" : "s")
+				+ " of yours it doesn't place")
+			+ ". Open your bank to see it.";
+	}
+
+	/**
+	 * What goes in an imported bank's Misc tab: each item in the bank (as {@code canon} names it, so a
+	 * placeholder counts as its item) that the layout doesn't place, once, in bank order. Bank fillers
+	 * and empty slots are skipped.
+	 */
+	static List<Integer> unplaced(List<Integer> bankItemIds, Set<Integer> placed, IntUnaryOperator canon)
+	{
+		List<Integer> out = new ArrayList<>();
+		Set<Integer> seen = new HashSet<>();
+		for (Integer raw : bankItemIds)
+		{
+			if (raw == null || raw <= 0 || raw == BANK_FILLER)
+			{
+				continue;
+			}
+			int c = canon.applyAsInt(raw);
+			if (!placed.contains(c) && seen.add(c))
+			{
+				out.add(c);
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Slice the bank's items into its native tabs: tabs 1 to {@code tabCounts.length} (each holding
+	 * the next {@code tabCounts[i]} items, as the BANK_TAB varbits count them), then the main tab with
+	 * the rest. Each tab is an array of slot -> item id (as {@code canon} names it, so a placeholder
+	 * becomes its item), with -1 for a bank filler or an empty slot, which keeps the gap in place.
+	 */
+	static List<int[]> nativeTabs(int[] itemIds, int[] tabCounts, IntUnaryOperator canon)
+	{
+		List<int[]> out = new ArrayList<>();
+		int offset = 0;
+		for (int t = 0; t <= tabCounts.length; t++)
+		{
+			int count = t == tabCounts.length ? itemIds.length - offset : tabCounts[t];
+			count = Math.max(0, Math.min(count, itemIds.length - offset));
+			int[] tab = new int[count];
+			for (int i = 0; i < count; i++)
+			{
+				int id = itemIds[offset + i];
+				tab[i] = id <= 0 || id == BANK_FILLER ? -1 : canon.applyAsInt(id);
+			}
+			out.add(tab);
+			offset += count;
+		}
+		return out;
+	}
+
+	/** True if a whole bank layout imported from the site is applied. */
+	boolean hasImportedBank()
+	{
+		return !csv(KEY_IMPORTED_BANK).isEmpty();
+	}
+
+	/** Delete the tabs of the last whole-bank import (leaves every other tab alone). */
+	void removeImportedBank(Runnable onDone)
+	{
+		clientThread.invoke(() ->
+		{
+			List<String> tags = csv(KEY_IMPORTED_BANK);
+			String active = bankTags.getActiveTag();
+			clearImportedBank();
+			tabManager.save();
+			if (active != null && tags.contains(active))
+			{
+				bankTags.closeBankTag();
+			}
+			if (onDone != null)
+			{
+				onDone.run();
+			}
+		});
+	}
+
+	private void clearImportedBank()
+	{
+		for (String tag : csv(KEY_IMPORTED_BANK))
+		{
+			tagManager.removeTag(tag);
+			layoutManager.removeLayout(tag);
+			tabManager.remove(tag);
+		}
+		configManager.unsetConfiguration(GROUP, KEY_IMPORTED_BANK);
 	}
 
 	/**
@@ -557,7 +734,13 @@ class BankOrganizer
 
 	private List<String> ownedTags()
 	{
-		String raw = configManager.getConfiguration(GROUP, KEY_OWNED);
+		return csv(KEY_OWNED);
+	}
+
+	/** A config value holding a comma-separated list of tag names. */
+	private List<String> csv(String key)
+	{
+		String raw = configManager.getConfiguration(GROUP, key);
 		if (raw == null || raw.trim().isEmpty())
 		{
 			return new ArrayList<>();

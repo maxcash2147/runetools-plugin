@@ -17,6 +17,10 @@ your real data instead of numbers you type in.
   it costs, and copy setups to and from the Inventory Setups plugin.
 - **Bank Organizer.** Sort your bank into category tabs with one click (as Bank Tags tabs; no items
   are moved), turn a native bank tab into a tag, and share a tab's layout on your RuneTools profile.
+- **Whole bank layouts.** Share every tab of your bank at once, placeholders included, to the
+  repository at runetools.com/layouts. Import someone else's there and the plugin builds it as Bank
+  Tags tabs, plus a Misc tab for anything you own that their layout doesn't place. Nothing is moved,
+  and **Remove imported bank tabs** undoes it.
 - **Combat Achievements and Collection Log.** Tier progress and points in the panel, with the
   planner and a browsable copy of your log on the site.
 - **RuneTools DPS.** A button in the Equipment Stats screen (and the side panel) opens the DPS
@@ -90,6 +94,7 @@ which is also where a key is revoked.
 | Combat timing totals for the session (see [How combat timing is measured](#how-combat-timing-is-measured)) | about every 30 seconds while they change, only with **Measure combat timing** on | your real latency and prayer stats on runetools.com/timing |
 | A gear setup's worn gear, inventory, rune pouch, quiver & spellbook | when you save or update that setup | two-way gear-setup sync |
 | A bank tab's item layout | only when you export a tab to share it | publish a shareable bank layout to your profile |
+| Which items sit where in each bank tab (never quantities) | only when you click **Share my whole bank layout** | publish your whole bank's layout, public only if you tick the box |
 | Bank contents | only if you enable **Include bank**, and only when you open the bank | holdings P/L, best-loadout-from-bank |
 
 That is the complete list: nothing else about the account, your client or other players is
@@ -238,7 +243,7 @@ These are every request the plugin makes, all to the configured server:
 - `GET /api/plugin/changes` - held open by the site until a setup or bank layout is saved there (or about 50 seconds pass), so those reach the client at once
 - `POST /api/plugin/combat-achievements` - CA catalogue + completion
 - `POST /api/plugin/collection-log` - totals, the whole obtained set, and any pages you opened
-- `GET /api/plugin/bank-layouts` (ETag) · `POST` - pull imported layouts / publish a shared bank tab
+- `GET /api/plugin/bank-layouts` (ETag) · `POST` - pull imported layouts / publish a shared bank tab or whole bank
 - `POST /api/plugin/timing` - this session's combat-timing totals (only with **Measure combat timing** on)
 - `POST /api/plugin/achievements` - achievements for your Adventurer's Log, a batch at a time
 

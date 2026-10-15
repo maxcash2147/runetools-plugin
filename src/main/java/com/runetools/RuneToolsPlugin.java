@@ -33,7 +33,12 @@ import java.util.function.IntConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.inject.Inject;
+import javax.swing.BoxLayout;
+import javax.swing.JCheckBox;
+import javax.swing.JLabel;
 import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
@@ -204,6 +209,7 @@ public class RuneToolsPlugin extends Plugin
 	// the client (all confirmed in the security audit - DoS / resource-exhaustion class).
 	private static final int MAX_LAYOUT_CELLS = 4096;               // bank layout grid upper bound
 	private static final int MAX_IMPORTED_LAYOUTS_PER_POLL = 100;
+	private static final int MAX_BANK_LAYOUT_TABS = 10;               // nine numbered tabs + the main tab
 
 	@Inject private Client client;
 	@Inject private RuneToolsConfig config;
@@ -260,6 +266,9 @@ public class RuneToolsPlugin extends Plugin
 	private int bankCoins;
 	private int activeOffers;
 	private volatile String layoutsEtag;
+	// A whole bank layout imported on the site needs this character's bank to build its Misc tab:
+	// set while one waits for the bank to be opened.
+	private volatile boolean bankImportWaiting;
 	private volatile boolean caCatalogSent;
 	private volatile int caCompletedHash;
 	private boolean caResyncPending;   // client thread only (set on chat, read on tick)
@@ -457,6 +466,7 @@ public class RuneToolsPlugin extends Plugin
 		panel.setOnOpened(() -> requestRemotePoll(PollSchedule.PANEL_GAP_MS));
 		panel.setMissingComputer(this::computeMissingItems);
 		panel.setOnOpenTiming(this::openTiming);
+		panel.setBankLayoutActions(this::exportWholeBank, this::removeImportedBank);
 		loadSpellbookIcons();
 		navButton = NavigationButton.builder()
 			.tooltip("RuneTools")
@@ -1080,6 +1090,12 @@ public class RuneToolsPlugin extends Plugin
 		}
 		else if (e.getContainerId() == InventoryID.BANK)
 		{
+			if (bankImportWaiting)
+			{
+				bankImportWaiting = false;
+				layoutsEtag = null;   // the waiting import has to come back in full, not as a 304
+				pollImportedLayouts();
+			}
 			bankCoins = c.count(COINS_ITEM_ID);
 			final JsonArray bank = config.syncBank() ? itemsToArray(c) : null;
 			final long gp = (long) inventoryCoins + (long) bankCoins;
@@ -2497,6 +2513,10 @@ public class RuneToolsPlugin extends Plugin
 					Set<String> applied = readAppliedLayouts();
 					boolean changed = false;
 					int processed = 0;
+					// Only the newest whole bank import applies (rows come oldest first); older ones
+					// it replaces are marked done without being built.
+					JsonObject bankImport = null;
+					String bankImportId = null;
 					for (JsonElement e : arr)
 					{
 						if (++processed > MAX_IMPORTED_LAYOUTS_PER_POLL)
@@ -2522,6 +2542,17 @@ public class RuneToolsPlugin extends Plugin
 						}
 						if (applied.contains(id))
 						{
+							continue;
+						}
+						if ("bank".equals(str(l, "kind", "tab")))
+						{
+							if (bankImportId != null)
+							{
+								applied.add(bankImportId);
+								changed = true;
+							}
+							bankImport = l;
+							bankImportId = id;
 							continue;
 						}
 						JsonArray cells = l.getAsJsonArray("cells");
@@ -2553,6 +2584,10 @@ public class RuneToolsPlugin extends Plugin
 					if (changed)
 					{
 						writeAppliedLayouts(applied);
+					}
+					if (bankImport != null)
+					{
+						applyBankImport(bankImportId, bankImport);
 					}
 				}
 				catch (Exception ex)
@@ -2606,6 +2641,81 @@ public class RuneToolsPlugin extends Plugin
 			}
 		}
 		return arr;
+	}
+
+	/**
+	 * Build a whole bank layout imported on the site: its tabs plus a Misc tab of everything else in
+	 * this character's bank. That needs the bank's contents, so until the bank has been opened this
+	 * session it waits (bankImportWaiting) and finishes the moment it is.
+	 */
+	private void applyBankImport(String id, JsonObject l)
+	{
+		String name = BankOrganizer.sanitizeTagName(str(l, "name", "Imported bank"));
+		final String label = name.isEmpty() ? "Imported bank" : name;
+		final List<BankOrganizer.BankTab> tabs = new ArrayList<>();
+		JsonArray arr = l.getAsJsonArray("tabs");
+		if (arr != null)
+		{
+			for (JsonElement e : arr)
+			{
+				if (tabs.size() >= MAX_BANK_LAYOUT_TABS || !e.isJsonObject())
+				{
+					break;
+				}
+				JsonObject t = e.getAsJsonObject();
+				JsonArray cells = t.getAsJsonArray("cells");
+				if (cells == null || cells.size() == 0)
+				{
+					continue;
+				}
+				int icon = t.has("icon_item_id") && !t.get("icon_item_id").isJsonNull()
+					? asInt(t, "icon_item_id", -1) : -1;
+				tabs.add(new BankOrganizer.BankTab(str(t, "name", "Tab"), icon, cellsToArray(cells)));
+			}
+		}
+		clientThread.invoke(() ->
+		{
+			Set<String> applied = readAppliedLayouts();
+			if (applied.contains(id))
+			{
+				return;   // a second poll got here first
+			}
+			ItemContainer bank = client.getItemContainer(InventoryID.BANK);
+			if (bank == null)
+			{
+				bankImportWaiting = true;
+				panel.setBankStatus("Open your bank to finish importing \"" + label + "\".", true);
+				return;
+			}
+			applied.add(id);   // first, so a layout that somehow errors can't be rebuilt on every poll
+			writeAppliedLayouts(applied);
+			List<Integer> ids = new ArrayList<>();
+			for (Item it : bank.getItems())
+			{
+				if (it.getId() > 0)
+				{
+					ids.add(it.getId());
+				}
+			}
+			try
+			{
+				panel.setBankStatus(bankOrganizer.applyImportedBank(label, tabs, ids), true);
+			}
+			catch (RuntimeException ex)
+			{
+				log.debug("RuneTools: skipped bad imported bank {}: {}", id, ex.toString());
+			}
+		});
+	}
+
+	private void removeImportedBank()
+	{
+		if (!bankOrganizer.hasImportedBank())
+		{
+			panel.setBankStatus("No imported bank layout to remove.", false);
+			return;
+		}
+		bankOrganizer.removeImportedBank(() -> panel.setBankStatus("Removed the imported bank tabs.", true));
 	}
 
 	private Set<String> readAppliedLayouts()
@@ -2836,6 +2946,103 @@ public class RuneToolsPlugin extends Plugin
 	}
 
 	/**
+	 * Share the whole bank's layout on runetools.com: numbered tabs 1-9, then the main tab, each item
+	 * at its slot in its tab. A placeholder is shared as the item it keeps a place for and a bank
+	 * filler as a gap. Only which items sit where is sent, never quantities.
+	 */
+	private void exportWholeBank()
+	{
+		if (!hasKeyAndConsent())
+		{
+			panel.setBankStatus("Enable consent in settings before sharing to the site.", false);
+			return;
+		}
+		clientThread.invoke(() ->
+		{
+			ItemContainer bank = client.getItemContainer(InventoryID.BANK);
+			if (bank == null)
+			{
+				panel.setBankStatus("Open your bank once, then share it.", false);
+				return;
+			}
+			Item[] items = bank.getItems();
+			int[] ids = new int[items.length];
+			for (int i = 0; i < items.length; i++)
+			{
+				ids[i] = items[i].getId();
+			}
+			int[] counts = new int[BANK_TAB_COUNTS.length];
+			for (int t = 0; t < counts.length; t++)
+			{
+				counts[t] = client.getVarbitValue(BANK_TAB_COUNTS[t]);
+			}
+			List<int[]> slices = BankOrganizer.nativeTabs(ids, counts, itemManager::canonicalize);
+			JsonArray tabs = new JsonArray();
+			int itemCount = 0;
+			for (int t = 0; t < slices.size(); t++)
+			{
+				int[] slots = slices.get(t);
+				JsonArray cells = new JsonArray();
+				for (int i = 0; i < slots.length; i++)
+				{
+					if (slots[i] > 0)
+					{
+						JsonObject c = new JsonObject();
+						c.addProperty("pos", i);
+						c.addProperty("item_id", slots[i]);
+						cells.add(c);
+					}
+				}
+				if (cells.size() > 0)
+				{
+					JsonObject tab = new JsonObject();
+					tab.addProperty("name", t == slices.size() - 1 ? "Main tab" : "Tab " + (t + 1));
+					tab.addProperty("icon_item_id", cells.get(0).getAsJsonObject().get("item_id").getAsInt());
+					tab.add("cells", cells);
+					tabs.add(tab);
+					itemCount += cells.size();
+				}
+			}
+			if (tabs.size() == 0)
+			{
+				panel.setBankStatus("Your bank looks empty - nothing to share.", false);
+				return;
+			}
+			Player me = client.getLocalPlayer();
+			final String suggested = me != null && me.getName() != null ? me.getName() + "'s bank" : "My bank";
+			final int tabCount = tabs.size();
+			final int total = itemCount;
+			SwingUtilities.invokeLater(() ->
+			{
+				JTextField name = new JTextField(suggested, 20);
+				JCheckBox listed = new JCheckBox("List it publicly so anyone can find and import it", true);
+				JPanel form = new JPanel();
+				form.setLayout(new BoxLayout(form, BoxLayout.Y_AXIS));
+				form.add(new JLabel("Name:"));
+				form.add(name);
+				form.add(listed);
+				form.add(new JLabel("<html>Shares which items sit where (" + total + " items in " + tabCount
+					+ " tab" + (tabCount == 1 ? "" : "s") + "), never quantities.<br>Unticked, only you can "
+					+ "see it, on your profile.</html>"));
+				int ok = JOptionPane.showConfirmDialog(panel, form, "Share my whole bank layout",
+					JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+				if (ok != JOptionPane.OK_OPTION || name.getText().trim().isEmpty())
+				{
+					return;
+				}
+				JsonObject body = new JsonObject();
+				body.addProperty("name", name.getText().trim());
+				body.addProperty("kind", "bank");
+				body.addProperty("is_public", listed.isSelected());
+				body.addProperty("icon_item_id", tabs.get(0).getAsJsonObject().get("icon_item_id").getAsInt());
+				body.add("tabs", tabs);
+				panel.setBankStatus("Sharing…", true);
+				api.postBankLayout(body, bankLayoutCallback(listed.isSelected()));
+			});
+		});
+	}
+
+	/**
 	 * Publish the currently-open bank tag (its layout + items) to the user's runetools.com profile,
 	 * where others can view it and import it. Reads the tag on the client thread, names it on the
 	 * EDT, then POSTs; on success copies the share link and opens the layout page.
@@ -2903,12 +3110,13 @@ public class RuneToolsPlugin extends Plugin
 				body.addProperty("icon_item_id", icon);
 				body.add("cells", cells);
 				panel.setBankStatus("Publishing…", true);
-				api.postBankLayout(body, bankLayoutCallback());
+				api.postBankLayout(body, bankLayoutCallback(true));
 			});
 		});
 	}
 
-	private Callback bankLayoutCallback()
+	/** Handles a layout export's answer. A private one has no public page, so it opens "My layouts". */
+	private Callback bankLayoutCallback(boolean isPublic)
 	{
 		return new Callback()
 		{
@@ -2941,7 +3149,12 @@ public class RuneToolsPlugin extends Plugin
 						final String u = isSafeShareUrl(url) ? url : null;
 						SwingUtilities.invokeLater(() ->
 						{
-							if (u != null)
+							if (!isPublic)
+							{
+								panel.setBankStatus("Saved privately - opening your layouts…", true);
+								LinkBrowser.browse(api.base() + "/layouts/mine");
+							}
+							else if (u != null)
 							{
 								copyToClipboard(u);
 								panel.setBankStatus("Published! Link copied - opening your layout…", true);
