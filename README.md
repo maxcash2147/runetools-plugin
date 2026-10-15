@@ -109,8 +109,12 @@ login screen.
 - **Uploads** (trades, account state, Combat Achievements, Collection Log, and combat timing when it
   is on) go out only when something actually changed, checked every 20 seconds; combat timing at most
   every 30 seconds. A completed GE buy is sent straight away.
-- **Changes made on the website** (gear setups, bank layouts you imported) are fetched with ETag
-  requests that cost a `304` when nothing changed. They start 30 seconds apart and back off to once
+- **Changes made on the website** (gear setups, bank layouts you imported) reach the client within a
+  second or two: while you're logged in with **Sync gear setups** on, the plugin keeps one request
+  open to the site, which answers the moment you save something there (or with an empty reply
+  after about 50 seconds, when the plugin asks again: under 2,000 small requests a day for a client
+  left logged in). As a fallback, they are also fetched with ETag requests that cost a `304` when
+  nothing changed. They start 30 seconds apart and back off to once
   every 5 minutes while nothing changes, so an idle logged-in client makes fewer than 600 of these
   requests a day. Opening the RuneTools side panel or your bank fetches them right away (at most
   once every 10 and 60 seconds respectively), and a change found on the site brings the 30-second
@@ -231,6 +235,7 @@ These are every request the plugin makes, all to the configured server:
 - `POST /api/plugin/trades` - completed GE fills (the server dedupes on `ext_id`)
 - `POST /api/plugin/state` - latest-wins snapshot of gp / offers / inventory / bank / skills
 - `GET /api/plugin/setups` (ETag) · `POST` · `PUT /{id}` · `DELETE /{id}` - two-way gear-setup sync
+- `GET /api/plugin/changes` - held open by the site until a setup or bank layout is saved there (or about 50 seconds pass), so those reach the client at once
 - `POST /api/plugin/combat-achievements` - CA catalogue + completion
 - `POST /api/plugin/collection-log` - totals, the whole obtained set, and any pages you opened
 - `GET /api/plugin/bank-layouts` (ETag) · `POST` - pull imported layouts / publish a shared bank tab

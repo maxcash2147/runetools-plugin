@@ -1826,6 +1826,7 @@ public class RuneToolsPlugin extends Plugin
 			log.debug("RuneTools: state sync waiting for in-game identity (RSN not captured yet)");
 		}
 		pollRemoteIfDue();                   // setups + imported layouts, on their own slower schedule
+		ensureLiveUpdates();                 // and the request the site answers the moment one is saved
 		if (config.syncCombatAchievements())
 		{
 			syncCombatAchievements();
@@ -1848,6 +1849,89 @@ public class RuneToolsPlugin extends Plugin
 	 * at once and is safe from any thread. Gated like the rest of the background loop: nothing goes
 	 * out unless a connected, consenting character is logged in and the server isn't backing us off.
 	 */
+	// Live updates: one request held open on the site, answered the moment a setup or bank layout is
+	// saved there (see RuneToolsApiClient.waitForChanges). Started from the sync loop, re-armed after
+	// every answer, and stopped by the same gate as every other sync (logged out, no consent, no key).
+	private final AtomicBoolean liveInFlight = new AtomicBoolean();
+	private final AtomicInteger liveFailures = new AtomicInteger();
+	private volatile String liveSetupsTag = "";
+	private volatile String liveLayoutsTag = "";
+	private volatile long liveRetryAt;
+
+	private void ensureLiveUpdates()
+	{
+		if (!config.syncSetups() || !syncAllowed() || System.currentTimeMillis() < liveRetryAt
+			|| !liveInFlight.compareAndSet(false, true))
+		{
+			return;
+		}
+		api.waitForChanges(liveSetupsTag, liveLayoutsTag, new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				liveBackoff();
+				liveInFlight.set(false);
+				log.debug("RuneTools: live updates paused: {}", ex.getMessage());
+			}
+
+			@Override
+			public void onResponse(Call call, Response resp)
+			{
+				boolean again = false;
+				try (Response r = resp)
+				{
+					if (r.code() == 204)
+					{
+						again = true;   // nothing saved meanwhile: ask again
+					}
+					else if (r.isSuccessful())
+					{
+						JsonObject o = new JsonParser().parse(RuneToolsApiClient.readBoundedBody(r)).getAsJsonObject();
+						liveSetupsTag = str(o, "setups_tag", liveSetupsTag);
+						liveLayoutsTag = str(o, "layouts_tag", liveLayoutsTag);
+						if (o.has("setups") && o.get("setups").getAsBoolean())
+						{
+							setupManager.poll();
+						}
+						if (o.has("layouts") && o.get("layouts").getAsBoolean())
+						{
+							pollImportedLayouts();
+						}
+						again = true;
+					}
+					else
+					{
+						liveBackoff();   // a rejected key or a rate limit: the sync loop reports those
+					}
+					if (again)
+					{
+						liveFailures.set(0);
+					}
+				}
+				catch (Exception ex)
+				{
+					liveBackoff();
+				}
+				finally
+				{
+					liveInFlight.set(false);
+				}
+				if (again)
+				{
+					ensureLiveUpdates();
+				}
+			}
+		});
+	}
+
+	/** After a failed wait: try again in 15 s, then 30, 60... up to 5 minutes. */
+	private void liveBackoff()
+	{
+		int n = liveFailures.incrementAndGet();
+		liveRetryAt = System.currentTimeMillis() + Math.min(300_000L, 15_000L << Math.min(n - 1, 5));
+	}
+
 	private void pollRemoteIfDue()
 	{
 		if (!config.syncSetups() || !syncAllowed() || System.currentTimeMillis() < nextSyncAtMillis)

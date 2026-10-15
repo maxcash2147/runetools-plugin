@@ -3,7 +3,10 @@ package com.runetools;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import okhttp3.Callback;
 import okhttp3.MediaType;
@@ -25,6 +28,9 @@ class RuneToolsApiClient
 	static final long MAX_RESPONSE_BYTES = 4L * 1024 * 1024;
 
 	private final OkHttpClient http;
+	// The same client, allowed to wait longer for an answer: the live-update request is held open by
+	// the site for up to 50 seconds on purpose.
+	private final OkHttpClient longPoll;
 	private final RuneToolsConfig config;
 	// Resolves the API key for the CURRENTLY logged-in character (per-account keys). Defaults to the
 	// legacy single config key; the plugin swaps in its per-account-hash resolver at startup.
@@ -33,6 +39,7 @@ class RuneToolsApiClient
 	RuneToolsApiClient(OkHttpClient http, RuneToolsConfig config)
 	{
 		this.http = http;
+		this.longPoll = http.newBuilder().readTimeout(80, TimeUnit.SECONDS).build();
 		this.config = config;
 		this.keySupplier = config::apiKey;
 	}
@@ -160,6 +167,18 @@ class RuneToolsApiClient
 		return new Request.Builder()
 			.url(base() + path)
 			.header("Accept", "application/json");
+	}
+
+	/**
+	 * Wait for setups or bank layouts saved on the site: the server answers as soon as either differs
+	 * from the versions given (the ones its last answer named; empty the first time), or with an
+	 * empty 204 after about 50 seconds. Response: {@code {setups, layouts, setups_tag, layouts_tag}}.
+	 */
+	void waitForChanges(String setupsTag, String layoutsTag, Callback callback)
+	{
+		String q = "?setups=" + URLEncoder.encode(setupsTag != null ? setupsTag : "", StandardCharsets.UTF_8)
+			+ "&layouts=" + URLEncoder.encode(layoutsTag != null ? layoutsTag : "", StandardCharsets.UTF_8);
+		longPoll.newCall(authed("/api/plugin/changes" + q).get().build()).enqueue(callback);
 	}
 
 	private Request.Builder authed(String path)
