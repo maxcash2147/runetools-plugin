@@ -22,8 +22,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
-import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -47,33 +45,26 @@ import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.api.GameState;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
-import net.runelite.api.HeadIcon;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
-import net.runelite.api.NPC;
 import net.runelite.api.Player;
-import net.runelite.api.Projectile;
 import net.runelite.api.Quest;
 import net.runelite.api.ScriptID;
 import net.runelite.api.Skill;
 import net.runelite.api.WorldType;
-import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.ItemContainerChanged;
-import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.ScriptPostFired;
 import net.runelite.api.events.ScriptPreFired;
 import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
-import net.runelite.api.gameval.AnimationID;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
-import net.runelite.api.gameval.SpotanimID;
 import net.runelite.api.gameval.SpriteID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.JavaScriptCallback;
@@ -147,7 +138,6 @@ public class RuneToolsPlugin extends Plugin
 	private static final String EP_COMBAT_ACHIEVEMENTS = "combat-achievements";
 	private static final String EP_COLLECTION_LOG = "collection-log";
 	private static final String EP_BANK_LAYOUTS = "bank-layouts";
-	private static final String EP_TIMING = "timing";
 	private static final String EP_ACHIEVEMENTS = "achievements";
 
 	// Adventurer's Log. Achievements wait here until sent, a batch at a time.
@@ -168,30 +158,6 @@ public class RuneToolsPlugin extends Plugin
 		{
 			QUEST_NAMES.add(q.getName());
 		}
-	}
-
-	// Combat timing (see CombatTiming). A session's totals go up at most this often while they change.
-	private static final long TIMING_SEND_GAP_MS = 30_000L;
-	private static final Set<String> EQUIP_OPTIONS = new HashSet<>(Arrays.asList("wield", "wear", "equip"));
-	// Jad's magic and ranged attack animations: TzTok-Jad in the Fight Caves (the cache calls him Lord
-	// Magmus), and JalTok-Jad in the Inferno and TzHaar-Ket-Rak's challenges. His melee, when you
-	// stand next to him, has no tell to read, so it isn't judged.
-	private static final Map<Integer, CombatTiming.Style> JAD_ATTACKS = new HashMap<>();
-	// The Hunllef's projectiles (normal and Corrupted). Its prayer-disabling attack is a magic attack.
-	private static final Map<Integer, CombatTiming.Style> HUNLLEF_PROJECTILES = new HashMap<>();
-
-	static
-	{
-		JAD_ATTACKS.put(AnimationID.LORDMAGMUS_FIRE, CombatTiming.Style.MAGIC);
-		JAD_ATTACKS.put(AnimationID.LORDMAGMUS_SMASH, CombatTiming.Style.RANGED);
-		JAD_ATTACKS.put(AnimationID.JALTOKJAD_ATTACK_MAGIC, CombatTiming.Style.MAGIC);
-		JAD_ATTACKS.put(AnimationID.JALTOKJAD_ATTACK_RANGED, CombatTiming.Style.RANGED);
-		HUNLLEF_PROJECTILES.put(SpotanimID.CRYSTAL_HUNLLEF_RANGE_TRAVEL, CombatTiming.Style.RANGED);
-		HUNLLEF_PROJECTILES.put(SpotanimID.CRYSTAL_HUNLLEF_RANGE_TRAVEL_HM, CombatTiming.Style.RANGED);
-		HUNLLEF_PROJECTILES.put(SpotanimID.CRYSTAL_HUNLLEF_MAGIC_TRAVEL, CombatTiming.Style.MAGIC);
-		HUNLLEF_PROJECTILES.put(SpotanimID.CRYSTAL_HUNLLEF_MAGIC_TRAVEL_HM, CombatTiming.Style.MAGIC);
-		HUNLLEF_PROJECTILES.put(SpotanimID.CRYSTAL_HUNLLEF_PRAYER_TRAVEL, CombatTiming.Style.MAGIC);
-		HUNLLEF_PROJECTILES.put(SpotanimID.CRYSTAL_HUNLLEF_PRAYER_TRAVEL_HM, CombatTiming.Style.MAGIC);
 	}
 
 	// "New item added to your collection log: Tanzanite fang" (tags removed first).
@@ -307,19 +273,6 @@ public class RuneToolsPlugin extends Plugin
 	// collection-log sync. Tied to the identity that saw them, so they are never sent as anyone else.
 	private final List<JsonObject> clogUnlocks = new ArrayList<>();   // guarded by clogLock
 	private String clogUnlocksOwner;                                   // guarded by clogLock
-
-	// Combat timing. The tracker exists only while "Measure combat timing" is on for a connected,
-	// consenting character, so nothing is even measured otherwise. It is fed and read on the client
-	// thread; the send bookkeeping below is also touched by OkHttp callbacks.
-	private CombatTiming timing;
-	private String timingOwner;          // rsn|hash the session belongs to; a different character starts a new one
-	private boolean timingFresh;         // first tick of a session or after a hop: projectiles in flight aren't new
-	private int timingPanelRevision = -2;
-	private volatile long timingSentAt;
-	private volatile CombatTiming timingSentFor;
-	private volatile int timingSentRevision = -1;
-	// Hunllef projectiles already counted (weak, so finished projectiles fall out on their own).
-	private final Set<Projectile> seenProjectiles = Collections.newSetFromMap(new WeakHashMap<>());
 
 	// Adventurer's Log (see AdventureLog). The detector and the level baseline live on the client thread;
 	// the queue is shared with the scheduler and OkHttp threads, hence its lock.
@@ -465,7 +418,6 @@ public class RuneToolsPlugin extends Plugin
 		// instead of waiting out the backoff.
 		panel.setOnOpened(() -> requestRemotePoll(PollSchedule.PANEL_GAP_MS));
 		panel.setMissingComputer(this::computeMissingItems);
-		panel.setOnOpenTiming(this::openTiming);
 		panel.setBankLayoutActions(this::exportWholeBank, this::removeImportedBank);
 		loadSpellbookIcons();
 		navButton = NavigationButton.builder()
@@ -494,7 +446,6 @@ public class RuneToolsPlugin extends Plugin
 		// unregistered, so no logout is ever seen - without this, disabling, switching character and
 		// re-enabling would upload the previous character's pages under the new one's key.
 		discardCollectionCapture();
-		timing = null;   // a disabled plugin measures nothing; unsent timing totals are dropped
 		adventureLog.reset();
 		levelBaseline = null;
 		levelBaselineXp = null;
@@ -554,13 +505,6 @@ public class RuneToolsPlugin extends Plugin
 			if (e.getGameState() != GameState.HOPPING)
 			{
 				remotePoll.reset();
-			}
-			// The tick stream breaks here, so nothing in flight can be timed. The session itself carries
-			// on if the same character comes back (ensureTiming starts a new one for anyone else).
-			if (timing != null)
-			{
-				timing.interrupt();
-				timingFresh = true;
 			}
 			// Half-seen achievements (a kill waiting for its time, a pet for its name) can't finish
 			// now, and the next login reads its levels afresh. Queued ones stay with their character.
@@ -723,17 +667,6 @@ public class RuneToolsPlugin extends Plugin
 	public void onGameTick(GameTick e)
 	{
 		updateIdentity();
-		CombatTiming t = ensureTiming();
-		if (t != null)
-		{
-			t.onTick(monotonicMillis(), overheadStyle());
-			scanHunllefProjectiles(t);
-			timingFresh = false;
-			if (t.revision() != timingPanelRevision)
-			{
-				pushTimingPanel();
-			}
-		}
 		// A CA-completion chat message fired: resync now (a tick later, so the completion varp has
 		// settled) instead of waiting for the 20s scheduler.
 		if (caResyncPending)
@@ -1054,18 +987,6 @@ public class RuneToolsPlugin extends Plugin
 		}
 		if (e.getContainerId() == InventoryID.WORN)
 		{
-			if (timing != null)
-			{
-				Set<Integer> worn = new HashSet<>();
-				for (Item it : c.getItems())
-				{
-					if (it.getId() > 0)
-					{
-						worn.add(it.getId());
-					}
-				}
-				timing.onWornChanged(worn);
-			}
 			// What the character wears is owned gear too (best-in-slot "from my bank" counts it).
 			final JsonArray eq = itemsToArray(c);
 			if (!eq.equals(snapshot.get().equipment))
@@ -1540,284 +1461,6 @@ public class RuneToolsPlugin extends Plugin
 		}
 	}
 
-	// -- combat timing (client thread; see CombatTiming) ---------------------- //
-
-	/**
-	 * The tracker for the character logged in now, or null when measuring is off, unconsented or the
-	 * character isn't connected. Turning the setting off drops the tracker and anything it hadn't
-	 * sent; a different character starts a fresh session.
-	 */
-	private CombatTiming ensureTiming()
-	{
-		AccountSnapshot s = snapshot.get();
-		if (!config.syncTiming() || !s.hasIdentity() || !hasKeyAndConsent())
-		{
-			if (timing != null)
-			{
-				timing = null;
-				timingOwner = null;
-				pushTimingPanel();
-			}
-			return null;
-		}
-		String owner = s.rsn + '|' + s.accountHash;
-		if (timing == null || !owner.equals(timingOwner))
-		{
-			String session = UUID.randomUUID().toString().replace("-", "").substring(0, 20);
-			timing = new CombatTiming(session, System.currentTimeMillis());
-			timingOwner = owner;
-			timingFresh = true;
-			timingSentAt = 0L;
-		}
-		return timing;
-	}
-
-	/** One clock for every timing event; only differences between its readings are used. */
-	private static long monotonicMillis()
-	{
-		return System.nanoTime() / 1_000_000L;
-	}
-
-	/** The local player's overhead protection prayer as the server last sent it, or null. */
-	private CombatTiming.Style overheadStyle()
-	{
-		Player me = client.getLocalPlayer();
-		HeadIcon icon = me != null ? me.getOverheadIcon() : null;
-		if (icon == HeadIcon.MELEE)
-		{
-			return CombatTiming.Style.MELEE;
-		}
-		if (icon == HeadIcon.RANGED)
-		{
-			return CombatTiming.Style.RANGED;
-		}
-		if (icon == HeadIcon.MAGIC)
-		{
-			return CombatTiming.Style.MAGIC;
-		}
-		return null;
-	}
-
-	/**
-	 * Equip clicks from the inventory and clicks on the protection prayers (or the quick-prayer orb).
-	 * Only observed: the click is never changed, consumed or repeated.
-	 */
-	@Subscribe
-	public void onMenuOptionClicked(MenuOptionClicked e)
-	{
-		CombatTiming t = timing;
-		if (t == null || e.isConsumed())
-		{
-			return;   // not measuring, or another plugin stopped this click from happening
-		}
-		long now = monotonicMillis();
-		String option = Text.removeTags(e.getMenuOption() != null ? e.getMenuOption() : "").trim().toLowerCase();
-		int widget = e.getParam1();
-		if (widget == InterfaceID.Inventory.ITEMS && EQUIP_OPTIONS.contains(option))
-		{
-			timingEquipClick(t, now, e.getItemId());
-		}
-		else if (widget == InterfaceID.Orbs.PRAYERBUTTON)
-		{
-			t.onQuickPrayerClick();
-		}
-		else if (WidgetUtil.componentToInterface(widget) == InterfaceID.PRAYERBOOK
-			&& ("activate".equals(option) || "deactivate".equals(option)))
-		{
-			CombatTiming.Style style = protectionPrayer(e.getMenuTarget());
-			if (style != null)
-			{
-				t.onPrayerClick(now, style, "activate".equals(option), overheadStyle());
-			}
-		}
-	}
-
-	/** The style a prayer-book menu target protects from, if it is a protection prayer. */
-	private static CombatTiming.Style protectionPrayer(String target)
-	{
-		String name = Text.removeTags(target != null ? target : "").trim().toLowerCase();
-		switch (name)
-		{
-			case "protect from melee":
-				return CombatTiming.Style.MELEE;
-			case "protect from missiles":
-				return CombatTiming.Style.RANGED;
-			case "protect from magic":
-				return CombatTiming.Style.MAGIC;
-			default:
-				return null;
-		}
-	}
-
-	/** Hand an equip click to the tracker (a latency sample once it lands). */
-	private void timingEquipClick(CombatTiming t, long now, int itemId)
-	{
-		if (itemId <= 0)
-		{
-			return;
-		}
-		ItemStats stats = itemManager.getItemStats(itemId);
-		ItemEquipmentStats eq = stats != null && stats.isEquipable() ? stats.getEquipment() : null;
-		if (eq == null)
-		{
-			return;
-		}
-		ItemContainer worn = client.getItemContainer(InventoryID.WORN);
-		boolean alreadyWorn = worn != null && worn.contains(itemId);
-		t.onEquipClick(now, itemId, alreadyWorn);
-	}
-
-	/** A Jad starting a magic or ranged attack on the local player. */
-	@Subscribe
-	public void onAnimationChanged(AnimationChanged e)
-	{
-		CombatTiming t = timing;
-		if (t == null || !(e.getActor() instanceof NPC))
-		{
-			return;
-		}
-		NPC npc = (NPC) e.getActor();
-		CombatTiming.Style style = JAD_ATTACKS.get(npc.getAnimation());
-		Player me = client.getLocalPlayer();
-		if (style != null && me != null && npc.getInteracting() == me)
-		{
-			t.onJadAttack(npc.getIndex(), style);
-		}
-	}
-
-	/**
-	 * Hunllef attacks launched at the local player this tick: a projectile is created on the tick its
-	 * attack happens, so one first seen at this GameTick is this tick's attack. Right after a session
-	 * starts (or a hop) the ones already in flight are only marked as seen.
-	 */
-	private void scanHunllefProjectiles(CombatTiming t)
-	{
-		Player me = client.getLocalPlayer();
-		for (Projectile p : client.getProjectiles())
-		{
-			CombatTiming.Style style = HUNLLEF_PROJECTILES.get(p.getId());
-			if (style == null || !seenProjectiles.add(p))
-			{
-				continue;
-			}
-			if (!timingFresh && me != null && p.getTargetActor() == me)
-			{
-				t.onHunllefAttack(style);
-			}
-		}
-	}
-
-	/** Refresh the panel's Combat Timing section from the tracker. Client thread. */
-	private void pushTimingPanel()
-	{
-		if (panel == null)
-		{
-			return;
-		}
-		CombatTiming t = timing;
-		if (t == null)
-		{
-			timingPanelRevision = -2;
-			panel.setTiming(false, null, null);
-			return;
-		}
-		timingPanelRevision = t.revision();
-		int samples = t.samples();
-		int latency = t.latencyMs();
-		String deadline = latency >= 0
-			? "Click deadline: ~" + latency + " ms before the tick (" + samples + " clicks)"
-			: "Click deadline: " + samples + " clicks measured, " + CombatTiming.MIN_SAMPLES + "+ needed";
-		StringBuilder prayer = new StringBuilder();
-		for (String fight : CombatTiming.FIGHTS)
-		{
-			int[] r = t.prayerResults(fight);
-			if (r == null || r[0] == 0)
-			{
-				continue;
-			}
-			if (prayer.length() > 0)
-			{
-				prayer.append(" · ");
-			}
-			String label = CombatTiming.TRIPLE.equals(fight) ? "Multi-Jad" : CombatTiming.HUNLLEF.equals(fight) ? "Hunllef" : "Jad";
-			prayer.append(label).append(' ').append(r[1]).append('/').append(r[0]).append(" blocked");
-		}
-		panel.setTiming(true, deadline, prayer.length() > 0 ? "Prayer: " + prayer : "Prayer: no Jad or Hunllef attacks yet");
-	}
-
-	private void openTiming()
-	{
-		LinkBrowser.browse(api.base() + "/timing");
-	}
-
-	/**
-	 * Send this session's timing totals if they changed and the last send was a while ago. The body
-	 * is built on the client thread (where the tracker lives) and posted from there; the totals are
-	 * cumulative per session, so the server simply keeps the latest copy and a resend is harmless.
-	 */
-	private void syncTiming()
-	{
-		clientThread.invoke(() ->
-		{
-			final CombatTiming t = timing;
-			if (t == null || !syncAllowed())
-			{
-				return;
-			}
-			int rev = t.revision();
-			if (timingSentFor == t && timingSentRevision == rev)
-			{
-				return;   // nothing new since the last successful send
-			}
-			if (rev == 0)
-			{
-				return;   // nothing measured yet this session
-			}
-			long now = System.currentTimeMillis();
-			if (now - timingSentAt < TIMING_SEND_GAP_MS)
-			{
-				return;
-			}
-			final String identity = syncIdentity();
-			JsonObject body = t.report();
-			final long payload = body.toString().hashCode();
-			if (parking.isParked(EP_TIMING, identity, payload))
-			{
-				return;
-			}
-			stampIdentity(body);
-			body.addProperty("ts", now);
-			timingSentAt = now;
-			api.postTiming(body, new Callback()
-			{
-				@Override
-				public void onFailure(Call call, IOException ex)
-				{
-					noteSyncFailure();
-					log.debug("RuneTools: timing sync failed (will retry): {}", ex.getMessage());
-				}
-
-				@Override
-				public void onResponse(Call call, Response resp)
-				{
-					try (Response r = resp)
-					{
-						noteSyncResult(r, EP_TIMING, identity, payload);
-						if (r.isSuccessful())
-						{
-							timingSentFor = t;
-							timingSentRevision = rev;
-						}
-						else
-						{
-							log.debug("RuneTools: timing sync HTTP {}", r.code());
-						}
-					}
-				}
-			});
-		});
-	}
-
 	// -- upload (scheduler thread; OkHttp enqueue is async, never blocks) ---- //
 
 	@Schedule(period = 20, unit = ChronoUnit.SECONDS, asynchronous = true)
@@ -1851,10 +1494,6 @@ public class RuneToolsPlugin extends Plugin
 		{
 			refreshCollectionTotals();   // keep overall progress fresh even if the log isn't open
 			syncCollectionLog();
-		}
-		if (config.syncTiming())
-		{
-			syncTiming();
 		}
 		flushAchievements();   // anything a failed send left queued (normally sent from the tick)
 	}

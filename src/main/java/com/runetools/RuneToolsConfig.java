@@ -77,13 +77,12 @@ public interface RuneToolsConfig extends Config
 			+ "or update that setup.\n"
 			+ "- A bank tab's item layout, only when you export it to share it.\n"
 			+ "- Your bank contents, only if you turn on \"Include bank\".\n"
-			+ "- Combat timing totals, only if you turn on \"Measure combat timing\" (see that setting).\n"
 			+ "- Achievements as they happen, for the Adventurer's Log on your public profile: level-ups, "
 			+ "quests, achievement diaries, combat tasks, pets, boss kill-count milestones and personal "
 			+ "bests, and clue milestones; and, only with \"Drops and loot\" on, valuable and untradeable "
 			+ "drops, chest and raid loot and valuable clue rewards (the item and its value).\n"
 			+ "Nothing else is sent. The automatic syncs can each be switched off under \"What to "
-			+ "sync\", \"Gear setups\", \"Combat timing\" and \"Adventurer's Log\", and your profile can be "
+			+ "sync\", \"Gear setups\" and \"Adventurer's Log\", and your profile can be "
 			+ "made private on the site.\n"
 			// The Plugin Hub requires this sentence, near enough verbatim, on any config item that
 			// turns on a third-party-server feature. Without it the plugin fails review.
@@ -208,37 +207,6 @@ public interface RuneToolsConfig extends Config
 	default boolean setupBankLayout()
 	{
 		return true;
-	}
-
-	@ConfigSection(
-		name = "Combat timing",
-		description = "Measure your real latency and protection prayers for the site's trainers",
-		position = 3
-	)
-	String timingSection = "timing";
-
-	@ConfigItem(
-		keyName = "syncTiming",
-		name = "Measure combat timing",
-		description = "Measure how your real clicks land on game ticks and show it on runetools.com/timing: "
-			+ "your effective latency (the Ping to use in the trainers) and your protection prayers against "
-			+ "Jad and the Hunllef. Only totals are sent.",
-		// Shown when the setting is turned on. Keep in step with CombatTiming.report() and the README.
-		warning = "With this on, while you play the plugin watches your equip clicks, your clicks on the "
-			+ "protection prayers, your overhead prayer and the attacks Jad and the Hunllef aim at you. "
-			+ "About once a minute it sends RuneTools only these totals for the session:\n"
-			+ "- How many of those clicks landed on the next game tick or one tick later, counted in 20 ms "
-			+ "steps by how long before the tick they were made (this is how your latency is worked out).\n"
-			+ "- For Jad, multi-Jad fights and the Hunllef: how many attacks you prayed against in time, "
-			+ "one tick late, with the wrong prayer or with none.\n"
-			+ "No single click, its time or where you clicked is ever sent. Nothing is measured or sent while "
-			+ "this is off, and turning it off drops anything not yet sent.",
-		section = timingSection,
-		position = 0
-	)
-	default boolean syncTiming()
-	{
-		return false;
 	}
 
 	@ConfigSection(

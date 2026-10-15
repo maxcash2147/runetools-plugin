@@ -26,11 +26,6 @@ your real data instead of numbers you type in.
 - **RuneTools DPS.** A button in the Equipment Stats screen (and the side panel) opens the DPS
   calculator with the gear you have on. The link it opens in your browser carries your worn items'
   IDs and your weapon's style, so the page can load them.
-- **Combat timing** (off until you turn on **Measure combat timing**). Measures how your real clicks
-  land on game ticks: your effective latency (the Ping to set in the site's Prayer and Gear Switch
-  trainers) and whether your protection prayers beat Jad and the Hunllef. The side panel shows it
-  as you play, and
-  [runetools.com/timing](https://runetools.com/timing) links each weak spot to the drill that trains it.
 - **Live drop timeline.** When the game announces a new Collection Log item, it reaches your profile's
   drop timeline within a minute, stamped with when you got it, without opening the log.
 - **Adventurer's Log.** Your achievements go on your public RuneTools profile as they happen: level-ups
@@ -91,7 +86,6 @@ which is also where a key is revoked.
 | Collection Log progress counts, your complete obtained set, and the items on pages you open | counts while playing; the obtained set when you open the log in-game | a browsable collection-log replica |
 | The name of each new Collection Log item the game announces in chat, and when | with the next sync after the message (Sync Collection Log on) | your profile's drop timeline, at the time you got it |
 | Achievements for your Adventurer's Log (see [How the Adventurer's Log is filled](#how-the-adventurers-log-is-filled)): what happened, with its level, quest, area, task, item and its value, boss, kill count, pet milestone or time | a few seconds after each one, while that kind is switched on | your profile's Adventurer's Log and the site's latest-achievements feed |
-| Combat timing totals for the session (see [How combat timing is measured](#how-combat-timing-is-measured)) | about every 30 seconds while they change, only with **Measure combat timing** on | your real latency and prayer stats on runetools.com/timing |
 | A gear setup's worn gear, inventory, rune pouch, quiver & spellbook | when you save or update that setup | two-way gear-setup sync |
 | A bank tab's item layout | only when you export a tab to share it | publish a shareable bank layout to your profile |
 | Which items sit where in each bank tab (never quantities) | only when you click **Share my whole bank layout** | publish your whole bank's layout, public only if you tick the box |
@@ -111,9 +105,8 @@ sync below also needs the character to be connected; everything else is a direct
 something you clicked (Connect, saving a setup, exporting a bank tab). Nothing is sent from the
 login screen.
 
-- **Uploads** (trades, account state, Combat Achievements, Collection Log, and combat timing when it
-  is on) go out only when something actually changed, checked every 20 seconds; combat timing at most
-  every 30 seconds. A completed GE buy is sent straight away.
+- **Uploads** (trades, account state, Combat Achievements, Collection Log) go out only when something
+  actually changed, checked every 20 seconds. A completed GE buy is sent straight away.
 - **Changes made on the website** (gear setups, bank layouts you imported) reach the client within a
   second or two: while you're logged in with **Sync gear setups** on, the plugin keeps one request
   open to the site, which answers the moment you save something there (or with an empty reply
@@ -165,31 +158,6 @@ Each entry carries a random id, so a resend after a network failure is recognise
 The site accepts only names it can check (quests, diary areas, combat tasks, pets, items and bosses it
 knows), and shows them on your profile only once the character is confirmed as yours and the profile
 isn't private.
-
-## How combat timing is measured
-
-Off by default. With **Measure combat timing** on (plus consent and a connected character) the plugin
-watches four things it already has in front of it: your equip clicks in the inventory, your clicks on
-the three protection prayers (and the quick-prayer orb, only to know a reading is ambiguous), your
-overhead prayer icon, and the attack animations and projectiles of Jad and the Hunllef aimed at you.
-It never changes, blocks or repeats a click; it only reads.
-
-The client processes everything the server sends for a tick and only then announces the tick
-(`GameTick`), so each change can be placed on the exact tick it happened:
-
-- **Latency.** For each equip click (and each click that turns a protection prayer on), the plugin
-  notes how long before the next tick appeared it was made, and whether the item (or overhead) came
-  back on that tick or the one after. Clicks made later than your latency before a tick miss it, so
-  the boundary between the two groups is your latency, in the sense the trainers use "ping".
-  Ticks that arrive irregularly (lag spikes, the first tick after a hop) are skipped.
-- **Prayers.** Jad's attack is decided 3 ticks after his animation starts (after your input on that
-  tick); the Hunllef checks the prayer that was up at the start of its attack tick. Each attack is
-  counted as blocked, one tick late, the wrong prayer, or no prayer. These are the same rules the site's
-  Prayer Trainer drills.
-
-What is sent, about every 30 seconds while it changes, is only the session's running totals: hit and
-miss counts in 20 ms buckets, and the prayer counts per fight. No single click, its time or position is sent. Turning the
-setting off stops all measuring and drops anything not yet sent.
 
 ## Build & run (development)
 
@@ -244,7 +212,6 @@ These are every request the plugin makes, all to the configured server:
 - `POST /api/plugin/combat-achievements` - CA catalogue + completion
 - `POST /api/plugin/collection-log` - totals, the whole obtained set, and any pages you opened
 - `GET /api/plugin/bank-layouts` (ETag) · `POST` - pull imported layouts / publish a shared bank tab or whole bank
-- `POST /api/plugin/timing` - this session's combat-timing totals (only with **Measure combat timing** on)
 - `POST /api/plugin/achievements` - achievements for your Adventurer's Log, a batch at a time
 
 All of them authenticate with `Authorization: Bearer rtk_…`. Keys can be listed and revoked on the
