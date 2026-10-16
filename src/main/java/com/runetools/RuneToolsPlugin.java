@@ -3261,7 +3261,10 @@ public class RuneToolsPlugin extends Plugin
 					}
 					catch (Exception ex)
 					{
-						panel.setStatus("Unexpected response from the site.", false);
+						// Never the body: it holds a one-time sign-in code.
+						log.warn("RuneTools: couldn't read the site's answer to Connect (HTTP {}, {}): {}",
+							resp.code(), resp.header("Content-Type"), ex.toString());
+						panel.setStatus("Unexpected response from the site (" + ex.getClass().getSimpleName() + ").", false);
 					}
 				}
 			});
@@ -3325,7 +3328,8 @@ public class RuneToolsPlugin extends Plugin
 					long ttl = o.has("expires_in") ? o.get("expires_in").getAsLong() : 600L;
 					if (token == null || code == null)
 					{
-						panel.setStatus("Unexpected response from the site.", false);
+						log.warn("RuneTools: the site's answer to pairing had no code (HTTP {})", r.code());
+						panel.setStatus("Unexpected response from the site (no pairing code).", false);
 						return;
 					}
 					pairing.set(new Pairing(token, code, accountHash, rsn, System.currentTimeMillis() + ttl * 1000L));
@@ -3339,7 +3343,9 @@ public class RuneToolsPlugin extends Plugin
 				}
 				catch (Exception ex)
 				{
-					panel.setStatus("Unexpected response from the site.", false);
+					log.warn("RuneTools: couldn't read the site's answer to pairing (HTTP {}, {}): {}",
+						resp.code(), resp.header("Content-Type"), ex.toString());
+					panel.setStatus("Unexpected response from the site (" + ex.getClass().getSimpleName() + ").", false);
 				}
 			}
 		});

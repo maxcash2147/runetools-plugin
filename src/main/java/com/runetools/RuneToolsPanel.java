@@ -2132,7 +2132,7 @@ class RuneToolsPanel extends PluginPanel
 	// Wrapping widths for HTML labels, inside the panel's 205px of content: the status lines, and a
 	// home-menu card's subtitle beside its chevron.
 	private static final int STATUS_WIDTH = 185;
-	private static final int CARD_TEXT_WIDTH = 155;
+	private static final int CARD_TEXT_WIDTH = 140;   // leaves room for the chevron and the panel's scrollbar
 
 	/**
 	 * Plain text as a label that wraps at {@code width} px instead of being cut off. The text is
