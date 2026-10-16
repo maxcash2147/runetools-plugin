@@ -51,6 +51,10 @@ picks up this character's key by itself a few seconds later, the panel reads *â€
 the button becomes **Open RuneTools** - press it to jump to the site signed in (for an account with an
 email, sign in with that).
 
+You only do this once per character. The key is kept, so from then on the character connects by itself
+every time you log in, with nothing to press. A character that isn't connected yet gets one reminder in
+chat each session (once you've given consent).
+
 One RuneTools account can hold several characters: connect each one while you're signed in. A
 character never connects without someone approving it in a browser, and the game's account hash is
 never enough to open an account. If another account has already *proven* it plays the character (by

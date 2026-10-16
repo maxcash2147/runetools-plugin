@@ -72,6 +72,10 @@ import net.runelite.api.widgets.Widget;
 import net.runelite.api.widgets.WidgetType;
 import net.runelite.api.widgets.WidgetUtil;
 import net.runelite.client.callback.ClientThread;
+import net.runelite.client.chat.ChatColorType;
+import net.runelite.client.chat.ChatMessageBuilder;
+import net.runelite.client.chat.ChatMessageManager;
+import net.runelite.client.chat.QueuedMessage;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.loottracker.LootReceived;
@@ -183,6 +187,7 @@ public class RuneToolsPlugin extends Plugin
 	@Inject private OkHttpClient okHttpClient;
 	@Inject private ClientToolbar clientToolbar;
 	@Inject private ClientThread clientThread;
+	@Inject private ChatMessageManager chatMessageManager;
 	@Inject private BankTagsService bankTagsService;
 	@Inject private TagManager tagManager;
 	@Inject private LayoutManager layoutManager;
@@ -232,6 +237,11 @@ public class RuneToolsPlugin extends Plugin
 	private int bankCoins;
 	private int activeOffers;
 	private volatile String layoutsEtag;
+	// Whether this login's character has been taken in (panel refreshed, first state upload queued).
+	// Kept apart from the snapshot's name, which a Grand Exchange event at login can fill before the
+	// first tick: keyed on that, the panel was never refreshed and kept offering "Connect" all session.
+	private volatile boolean identityAnnounced;
+	private final Set<String> remindedToConnect = new HashSet<>();   // account hashes told this session
 	// A whole bank layout imported on the site needs this character's bank to build its Misc tab:
 	// set while one waits for the bank to be opened.
 	private volatile boolean bankImportWaiting;
@@ -495,6 +505,7 @@ public class RuneToolsPlugin extends Plugin
 		{
 			// Character context is gone; drop identity so we never attribute to the wrong RSN.
 			snapshot.updateAndGet(s -> s.toBuilder().rsn(null).build());
+			identityAnnounced = false;
 			// Drop any half-read Collection Log: the next character's log must never inherit it.
 			discardCollectionCapture();
 			// Whoever logs in next gets a clean slate: a different character has a different key, and
@@ -1109,7 +1120,8 @@ public class RuneToolsPlugin extends Plugin
 		{
 			return;
 		}
-		boolean firstIdentity = snapshot.get().rsn == null;
+		boolean firstIdentity = !identityAnnounced;
+		identityAnnounced = true;
 		long ah = client.getAccountHash();
 		final String hash = ah == -1 ? null : Long.toString(ah);
 		final boolean members = client.getWorldType().contains(WorldType.MEMBERS);
@@ -1120,10 +1132,30 @@ public class RuneToolsPlugin extends Plugin
 			recomputeGpAndOffers();
 			stateDirty.set(true);
 			updatePanelStatic();
+			remindToConnect(name, hash);
 			// RSN only at DEBUG; never log the persistent account hash (a stable cross-session
 			// correlator) to the on-disk client log users routinely share.
 			log.debug("RuneTools: identity captured for {}", name);
 		}
+	}
+
+	/**
+	 * Once per session, a character with no RuneTools key gets a line in chat saying how to connect
+	 * it, so it isn't forgotten. A connected character needs nothing: its key is kept between
+	 * sessions and it syncs on its own from login. Nothing is said until consent is given.
+	 */
+	private void remindToConnect(String rsn, String hash)
+	{
+		if (hash == null || !config.consent() || keyForHash(hash) != null || !remindedToConnect.add(hash))
+		{
+			return;
+		}
+		String msg = new ChatMessageBuilder()
+			.append(ChatColorType.HIGHLIGHT).append("RuneTools: ")
+			.append(ChatColorType.NORMAL).append(rsn + " isn't connected yet. Open the RuneTools side panel and press "
+				+ "Connect to RuneTools; after that it connects by itself every time you log in.")
+			.build();
+		chatMessageManager.queue(QueuedMessage.builder().type(ChatMessageType.CONSOLE).runeLiteFormattedMessage(msg).build());
 	}
 
 	private void recomputeGpAndOffers()
@@ -1666,7 +1698,13 @@ public class RuneToolsPlugin extends Plugin
 		{
 			case OK:
 				parking.release(endpoint, identity);
+				boolean wasRevoked = authRevoked;
 				resumeSync();
+				panel.setLastSync(nowString());
+				if (wasRevoked)
+				{
+					updatePanelStatic();   // the key works again: back to "Connected as ..."
+				}
 				break;
 			case IGNORED:
 				break;
@@ -3186,7 +3224,8 @@ public class RuneToolsPlugin extends Plugin
 			final String rsn = p != null ? p.getName() : null;
 			if (rsn == null || rsn.isEmpty())
 			{
-				panel.setStatus("Log into the game first, then open the site.", false);
+				// No character yet: nothing to sign in as, so just open the site.
+				SwingUtilities.invokeLater(() -> LinkBrowser.browse(api.base() + "/"));
 				return;
 			}
 			long ah = client.getAccountHash();
@@ -3683,10 +3722,12 @@ public class RuneToolsPlugin extends Plugin
 		boolean linked = activeApiKey() != null;
 		// A key the server keeps rejecting is functionally "not connected", so put the CTA back to
 		// "Connect to RuneTools" - re-linking the character is exactly what mints a working key.
-		panel.setConnectButton(linked && !authRevoked);   // "Connect to RuneTools" vs "Open RuneTools"
-		if (!snapshot.get().hasIdentity())
+		// Before login the character isn't known yet, so there is nothing to connect: "Open RuneTools".
+		boolean known = snapshot.get().hasIdentity();
+		panel.setConnectButton(!known || (linked && !authRevoked));   // "Connect to RuneTools" vs "Open RuneTools"
+		if (!known)
 		{
-			panel.setStatus("Waiting for login", true);
+			panel.setStatus("Log in to the game: connected characters sync by themselves", true);
 		}
 		else if (!linked)
 		{
