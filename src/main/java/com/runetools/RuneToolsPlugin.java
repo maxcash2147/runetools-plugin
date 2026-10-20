@@ -1701,9 +1701,12 @@ public class RuneToolsPlugin extends Plugin
 				boolean wasRevoked = authRevoked;
 				resumeSync();
 				panel.setLastSync(nowString());
-				if (wasRevoked)
+				// A sync that worked means any red message (a key that stopped working, the site
+				// unreachable a moment ago, an earlier sign-in answer) no longer holds: put the
+				// panel back to "Connected as ..." instead of leaving it red while syncs succeed.
+				if (wasRevoked || panel.isStatusError())
 				{
-					updatePanelStatic();   // the key works again: back to "Connected as ..."
+					updatePanelStatic();
 				}
 				break;
 			case IGNORED:

@@ -1978,8 +1978,17 @@ class RuneToolsPanel extends PluginPanel
 
 	// -- status setters ------------------------------------------------------ //
 
+	// Whether the status line last showed a problem (red), so a later successful sync can clear it.
+	private volatile boolean statusError;
+
+	boolean isStatusError()
+	{
+		return statusError;
+	}
+
 	void setStatus(String text, boolean ok)
 	{
+		statusError = !ok;
 		SwingUtilities.invokeLater(() ->
 		{
 			// leading dot picks up the status colour (green ok / red not); long messages wrap
