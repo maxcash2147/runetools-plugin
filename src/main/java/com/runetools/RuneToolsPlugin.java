@@ -3257,9 +3257,12 @@ public class RuneToolsPlugin extends Plugin
 							}
 							if ("email_signin".equals(why))
 							{
-								// Already connected; a browser session for an account with an email needs the email.
-								panel.setStatus("This account has an email - sign in with it on the site.", false);
-								SwingUtilities.invokeLater(() -> LinkBrowser.browse(api.base() + "/"));
+								// Nothing is wrong: the character is connected and syncing, but an account
+								// with an email signs the browser in with that, never with the plugin's key.
+								// Open the account page (it offers Sign in when the browser isn't), and put
+								// the panel back to "Connected as ..." rather than leaving a red message.
+								updatePanelStatic();
+								SwingUtilities.invokeLater(() -> LinkBrowser.browse(api.base() + "/account"));
 							}
 							else
 							{
