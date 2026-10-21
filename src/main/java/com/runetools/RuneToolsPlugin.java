@@ -445,8 +445,12 @@ public class RuneToolsPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
-		// Drop the reference to our injected equipment DPS button; the client clears the interface's
-		// dynamic children (and resets the nudged native buttons) when it's next reopened. We avoid
+		// Close our Bank Tags setup filter if it is the one open, so the bank isn't left filtered to a
+		// gear setup after the plugin is disabled. Another plugin's open tag is left alone.
+		bankFilter.clear();
+		// Drop the reference to our injected equipment DPS button. Its widgets are dynamic children of
+		// the equipment interface, which the game discards when that interface closes or redraws its
+		// stats page; no native widget is moved or changed, so there is nothing to restore. We avoid
 		// deleteAllChildren() here so we never wipe the Wiki plugin's own button off the shared parent.
 		dpsButton = null;
 		pairing.set(null);   // a pending pairing dies with the plugin; Connect starts a fresh one
