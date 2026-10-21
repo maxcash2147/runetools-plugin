@@ -65,6 +65,7 @@ import net.runelite.api.events.WidgetClosed;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
+import net.runelite.api.gameval.ItemID;
 import net.runelite.api.gameval.SpriteID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.JavaScriptCallback;
@@ -116,7 +117,6 @@ import okhttp3.Response;
 )
 public class RuneToolsPlugin extends Plugin
 {
-	private static final int COINS_ITEM_ID = 995;
 	// The equipment-bonuses interface ("Equip Your Character"), where we inject a "RuneTools DPS"
 	// button - copying RuneLite's Wiki "View DPS" button (net.runelite...plugins.wiki.WikiDpsManager).
 	private static final int EQUIP_GROUP = InterfaceID.EQUIPMENT;
@@ -534,7 +534,7 @@ public class RuneToolsPlugin extends Plugin
 			// Opening the bank is when setups and imported layouts get used, so fetch any new ones.
 			requestRemotePoll(PollSchedule.BANK_GAP_MS);
 		}
-		else if (e.getGroupId() == CollectionLog.GROUP)
+		else if (e.getGroupId() == InterfaceID.COLLECTION)
 		{
 			clogAskedThisOpen = false;   // a fresh opening of the log may ask for the whole log once
 		}
@@ -584,7 +584,7 @@ public class RuneToolsPlugin extends Plugin
 		long total = 0;
 		for (Map.Entry<Integer, Integer> en : qty.entrySet())
 		{
-			long each = en.getKey() == COINS_ITEM_ID ? 1 : itemManager.getItemPrice(en.getKey());
+			long each = en.getKey() == ItemID.COINS ? 1 : itemManager.getItemPrice(en.getKey());
 			long value = Math.max(0, each) * en.getValue();
 			total += value;
 			priced.add(new long[]{en.getKey(), en.getValue(), value});
@@ -620,7 +620,7 @@ public class RuneToolsPlugin extends Plugin
 				continue;
 			}
 			int id = itemManager.canonicalize(it.getId());
-			long each = id == COINS_ITEM_ID ? 1 : itemManager.getItemPrice(id);
+			long each = id == ItemID.COINS ? 1 : itemManager.getItemPrice(id);
 			stacks.add(new AdventureLog.LootStack(itemManager.getItemComposition(id).getName(), it.getQuantity(),
 				Math.max(0, each) * it.getQuantity()));
 		}
@@ -668,7 +668,7 @@ public class RuneToolsPlugin extends Plugin
 	@Subscribe
 	public void onVarbitChanged(VarbitChanged e)
 	{
-		if (e.getVarbitId() == CollectionLog.VB_POH_HOST_BOOK_OPEN && CollectionLog.isOtherPlayers(client))
+		if (e.getVarbitId() == VarbitID.COLLECTION_POH_HOST_BOOK_OPEN && CollectionLog.isOtherPlayers(client))
 		{
 			discardCollectionCapture();
 		}
@@ -918,7 +918,7 @@ public class RuneToolsPlugin extends Plugin
 			}
 			return;
 		}
-		if (e.getScriptId() != CollectionLog.DRAW_SCRIPT || !collectionLogSyncOn())
+		if (e.getScriptId() != ScriptID.COLLECTION_DRAW_LIST || !collectionLogSyncOn())
 		{
 			return;
 		}
@@ -1009,7 +1009,7 @@ public class RuneToolsPlugin extends Plugin
 		}
 		if (e.getContainerId() == InventoryID.INV)
 		{
-			inventoryCoins = c.count(COINS_ITEM_ID);
+			inventoryCoins = c.count(ItemID.COINS);
 			final JsonArray inv = itemsToArray(c);
 			final long gp = (long) inventoryCoins + (long) bankCoins;
 			AccountSnapshot before = snapshot.get();
@@ -1028,7 +1028,7 @@ public class RuneToolsPlugin extends Plugin
 				layoutsEtag = null;   // the waiting import has to come back in full, not as a 304
 				pollImportedLayouts();
 			}
-			bankCoins = c.count(COINS_ITEM_ID);
+			bankCoins = c.count(ItemID.COINS);
 			final JsonArray bank = config.syncBank() ? itemsToArray(c) : null;
 			final long gp = (long) inventoryCoins + (long) bankCoins;
 			AccountSnapshot before = snapshot.get();
@@ -1164,13 +1164,13 @@ public class RuneToolsPlugin extends Plugin
 		final JsonArray invArr = inv != null ? itemsToArray(inv) : null;
 		if (inv != null)
 		{
-			inventoryCoins = inv.count(COINS_ITEM_ID);
+			inventoryCoins = inv.count(ItemID.COINS);
 		}
 		ItemContainer bank = client.getItemContainer(InventoryID.BANK);
 		JsonArray bankArr = null;
 		if (bank != null)
 		{
-			bankCoins = bank.count(COINS_ITEM_ID);
+			bankCoins = bank.count(ItemID.COINS);
 			bankArr = config.syncBank() ? itemsToArray(bank) : null;
 		}
 		final JsonArray bankJson = bankArr;
@@ -3523,7 +3523,7 @@ public class RuneToolsPlugin extends Plugin
 		{
 			dpsButton = null;   // dynamic children are destroyed with the interface; allow a fresh add
 		}
-		else if (e.getGroupId() == CollectionLog.GROUP)
+		else if (e.getGroupId() == InterfaceID.COLLECTION)
 		{
 			clogAskedThisOpen = false;
 		}

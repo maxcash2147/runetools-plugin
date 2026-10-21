@@ -5,11 +5,14 @@ import com.google.gson.JsonObject;
 import net.runelite.api.Client;
 import net.runelite.api.EnumComposition;
 import net.runelite.api.StructComposition;
+import net.runelite.api.gameval.VarPlayerID;
+import net.runelite.api.gameval.VarbitID;
 
 /**
  * Reads the player's Combat Achievements - the full task catalogue and per-task completion - straight
- * from the game cache, so the site can render a proper planner. All ids are stable cache constants
- * (verified against osrs-reldo/task-json-store and the combat-achievements-tracker plugin):
+ * from the game cache, so the site can render a proper planner. Varbits and varps come from RuneLite's
+ * gameval constants; the tier enums and task struct params have no public constant, so they are stable
+ * cache ids (verified against osrs-reldo/task-json-store and the combat-achievements-tracker plugin):
  *
  * <ul>
  *   <li>one int-enum of task struct ids per tier ({@link #TIER_ENUMS});</li>
@@ -30,13 +33,20 @@ final class CombatAchievements
 	static final String[] TIER_LABELS = {"Easy", "Medium", "Hard", "Elite", "Master", "Grandmaster"};
 
 	// Point thresholds to COMPLETE each tier - game varbits, read at runtime because Jagex bumps
-	// them whenever tasks are added (verified vs osrs-reldo/task-json-store).
-	private static final int[] TIER_THRESHOLD_VARBITS = {4132, 10660, 10661, 14812, 14813, 14814};
+	// them whenever tasks are added.
+	private static final int[] TIER_THRESHOLD_VARBITS = {
+		VarbitID.CA_THRESHOLD_EASY, VarbitID.CA_THRESHOLD_MEDIUM, VarbitID.CA_THRESHOLD_HARD,
+		VarbitID.CA_THRESHOLD_ELITE, VarbitID.CA_THRESHOLD_MASTER, VarbitID.CA_THRESHOLD_GRANDMASTER};
 
 	// Completion bitmap varps, in bit order - non-contiguous game varp ids, order is load-bearing.
 	private static final int[] COMPLETION_VARPS = {
-		3116, 3117, 3118, 3119, 3120, 3121, 3122, 3123, 3124, 3125, 3126, 3127, 3128,
-		3387, 3718, 3773, 3774, 4204, 4496, 4721};
+		VarPlayerID.CA_TASK_COMPLETED_0, VarPlayerID.CA_TASK_COMPLETED_1, VarPlayerID.CA_TASK_COMPLETED_2,
+		VarPlayerID.CA_TASK_COMPLETED_3, VarPlayerID.CA_TASK_COMPLETED_4, VarPlayerID.CA_TASK_COMPLETED_5,
+		VarPlayerID.CA_TASK_COMPLETED_6, VarPlayerID.CA_TASK_COMPLETED_7, VarPlayerID.CA_TASK_COMPLETED_8,
+		VarPlayerID.CA_TASK_COMPLETED_9, VarPlayerID.CA_TASK_COMPLETED_10, VarPlayerID.CA_TASK_COMPLETED_11,
+		VarPlayerID.CA_TASK_COMPLETED_12, VarPlayerID.CA_TASK_COMPLETED_13, VarPlayerID.CA_TASK_COMPLETED_14,
+		VarPlayerID.CA_TASK_COMPLETED_15, VarPlayerID.CA_TASK_COMPLETED_16, VarPlayerID.CA_TASK_COMPLETED_17,
+		VarPlayerID.CA_TASK_COMPLETED_18, VarPlayerID.CA_TASK_COMPLETED_19};
 
 	// CA task struct params.
 	private static final int P_ID = 1306;       // global task id (also the completion bit index)

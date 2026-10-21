@@ -8,13 +8,14 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.function.IntUnaryOperator;
+import net.runelite.api.gameval.ItemID;
 import org.junit.Test;
 
 public class BankOrganizerTest
 {
 	// A placeholder (here 14000 + id) names the item it holds a place for, like ItemManager.canonicalize.
 	private static final IntUnaryOperator CANON = id -> id > 14000 ? id - 14000 : id;
-	private static final int FILLER = BankOrganizer.BANK_FILLER;
+	private static final int FILLER = ItemID.BANK_FILLER;
 
 	@Test
 	public void slicesTheBankIntoItsNumberedTabsThenTheMainTab()

@@ -10,6 +10,7 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.IntUnaryOperator;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.gameval.ItemID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.game.ItemManager;
@@ -43,7 +44,6 @@ class BankOrganizer
 	// Core Bank Tags config: the ordered CSV of tag-tab names the bank rebuilds its tab bar from.
 	private static final int COLS = 8;
 	private static final int MAX_LAYOUT_CELLS = 4096;   // hard cap on an imported layout's grid size
-	static final int BANK_FILLER = 20594;               // holds a bank slot open; never a real item
 
 	private final BankTagsService bankTags;
 	private final TagManager tagManager;
@@ -492,7 +492,7 @@ class BankOrganizer
 		for (int i = 0; i < safe.length; i++)
 		{
 			int id = safe[i];
-			if (id > 0 && plausibleItemId(id) && id != BANK_FILLER)
+			if (id > 0 && plausibleItemId(id) && id != ItemID.BANK_FILLER)
 			{
 				int c = itemManager.canonicalize(id);
 				tagManager.addTag(c, tag, false);
@@ -599,7 +599,7 @@ class BankOrganizer
 		Set<Integer> seen = new HashSet<>();
 		for (Integer raw : bankItemIds)
 		{
-			if (raw == null || raw <= 0 || raw == BANK_FILLER)
+			if (raw == null || raw <= 0 || raw == ItemID.BANK_FILLER)
 			{
 				continue;
 			}
@@ -630,7 +630,7 @@ class BankOrganizer
 			for (int i = 0; i < count; i++)
 			{
 				int id = itemIds[offset + i];
-				tab[i] = id <= 0 || id == BANK_FILLER ? -1 : canon.applyAsInt(id);
+				tab[i] = id <= 0 || id == ItemID.BANK_FILLER ? -1 : canon.applyAsInt(id);
 			}
 			out.add(tab);
 			offset += count;

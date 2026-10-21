@@ -7,6 +7,8 @@ import java.util.List;
 import net.runelite.api.Client;
 import net.runelite.api.MenuAction;
 import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.gameval.VarPlayerID;
+import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.game.ItemManager;
 
@@ -18,37 +20,35 @@ import net.runelite.client.game.ItemManager;
  * <em>interface</em> as the player opens pages - the same approach the collection-log ecosystem
  * uses. Overall progress comes straight from varps and is available the moment you log in.
  *
- * <p>All ids are verified public RuneLite constants (group {@code InterfaceID.COLLECTION},
- * component {@code InterfaceID.Collection.ITEMS_CONTENTS}, {@code ScriptID.COLLECTION_DRAW_LIST},
- * {@code VarPlayerID.COLLECTION_COUNT*}, {@code VarbitID.COLLECTION_LAST_TAB/_CATEGORY}). Every
- * read here touches widgets/varps and MUST run on the client thread.
+ * <p>Interface, varbit and varp ids come from RuneLite's gameval constants ({@code InterfaceID},
+ * {@code VarbitID}, {@code VarPlayerID}); the page-draw script is {@code ScriptID.COLLECTION_DRAW_LIST}.
+ * The three whole-log scripts below ({@link #SETUP_SCRIPT}, {@link #TRANSMIT_SCRIPT},
+ * {@link #INIT_SCRIPT}) have no public constant, so they stay numeric. Every read here touches
+ * widgets/varps and MUST run on the client thread.
  */
 final class CollectionLog
 {
-	static final int GROUP = 621;            // InterfaceID.COLLECTION
-	static final int DRAW_SCRIPT = 2731;     // ScriptID.COLLECTION_DRAW_LIST - fires when a page is drawn
-	private static final int ITEMS_CONTENTS = 37;   // InterfaceID.Collection.ITEMS_CONTENTS (child of group 621)
-
 	// Whole-log transmit. SETUP_SCRIPT fires when the interface is built; asking for a search makes
 	// the server send every entry, one TRANSMIT_SCRIPT pre-fire each; INIT_SCRIPT restores the view.
 	static final int SETUP_SCRIPT = 7797;      // collection log interface setup
 	static final int TRANSMIT_SCRIPT = 4100;   // one obtained entry: args {?, itemId, quantity}
 	private static final int INIT_SCRIPT = 2240;
-	// VarbitID.COLLECTION_POH_HOST_BOOK_OPEN - 1 while viewing someone else's log via their POH.
-	static final int VB_POH_HOST_BOOK_OPEN = 12061;
 
-	// Per-tab page-list containers (InterfaceID.Collection.*_CONTAINER), indexed by tab 0..4.
-	private static final int[] TAB_CONTAINER = {10, 14, 24, 26, 29};   // boss, raid, clue, minigame, other
+	// Per-tab page-list containers, indexed by tab 0..4: boss, raid, clue, minigame, other.
+	private static final int[] TAB_CONTAINER = {
+		InterfaceID.Collection.BOSS_CONTAINER,
+		InterfaceID.Collection.RAID_CONTAINER,
+		InterfaceID.Collection.CLUE_CONTAINER,
+		InterfaceID.Collection.MINIGAME_CONTAINER,
+		InterfaceID.Collection.OTHER_CONTAINER};
 
-	// Which page is currently open (varbits) - a stable (tab, category) key independent of the UI text.
-	private static final int VB_LAST_TAB = 6905;       // VarbitID.COLLECTION_LAST_TAB
-	private static final int VB_LAST_CATEGORY = 6906;  // VarbitID.COLLECTION_LAST_CATEGORY
-
-	// Overall + per-tab obtained/total counters (VarPlayerID.*) - always available once logged in.
-	private static final int VP_COUNT = 2943;      // VarPlayerID.COLLECTION_COUNT
-	private static final int VP_COUNT_MAX = 2944;  // VarPlayerID.COLLECTION_COUNT_MAX
-	private static final int[][] VP_TAB = {        // {obtained, total} per tab, in tab order
-		{4613, 4614}, {4615, 4616}, {4617, 4618}, {4619, 4620}, {4621, 4622}};
+	// Per-tab {obtained, total} counters, in tab order - always available once logged in.
+	private static final int[][] VP_TAB = {
+		{VarPlayerID.COLLECTION_COUNT_BOSSES, VarPlayerID.COLLECTION_COUNT_BOSSES_MAX},
+		{VarPlayerID.COLLECTION_COUNT_RAIDS, VarPlayerID.COLLECTION_COUNT_RAIDS_MAX},
+		{VarPlayerID.COLLECTION_COUNT_CLUES, VarPlayerID.COLLECTION_COUNT_CLUES_MAX},
+		{VarPlayerID.COLLECTION_COUNT_MINIGAMES, VarPlayerID.COLLECTION_COUNT_MINIGAMES_MAX},
+		{VarPlayerID.COLLECTION_COUNT_OTHER, VarPlayerID.COLLECTION_COUNT_OTHER_MAX}};
 	static final String[] TAB_NAMES = {"Bosses", "Raids", "Clues", "Minigames", "Other"};
 
 	private CollectionLog()
@@ -58,13 +58,13 @@ final class CollectionLog
 	/** Overall + per-tab progress, straight from varps. Returns null before the counters populate. */
 	static JsonObject readTotals(Client client)
 	{
-		int total = client.getVarpValue(VP_COUNT_MAX);
+		int total = client.getVarpValue(VarPlayerID.COLLECTION_COUNT_MAX);
 		if (total <= 0)
 		{
 			return null;
 		}
 		JsonObject t = new JsonObject();
-		t.addProperty("obtained", Math.max(0, client.getVarpValue(VP_COUNT)));
+		t.addProperty("obtained", Math.max(0, client.getVarpValue(VarPlayerID.COLLECTION_COUNT)));
 		t.addProperty("total", total);
 		JsonArray tabs = new JsonArray();
 		for (int i = 0; i < VP_TAB.length; i++)
@@ -82,7 +82,7 @@ final class CollectionLog
 	/** The page currently drawn in the open collection log, or null if it can't be read. */
 	static Page readOpenPage(Client client, ItemManager itemManager)
 	{
-		Widget container = client.getWidget(GROUP, ITEMS_CONTENTS);
+		Widget container = client.getWidget(InterfaceID.Collection.ITEMS_CONTENTS);
 		if (container == null)
 		{
 			return null;
@@ -93,8 +93,9 @@ final class CollectionLog
 			return null;
 		}
 
-		int tab = client.getVarbitValue(VB_LAST_TAB);
-		int category = client.getVarbitValue(VB_LAST_CATEGORY);
+		// Which page is open - a stable (tab, category) key independent of the UI text.
+		int tab = client.getVarbitValue(VarbitID.COLLECTION_LAST_TAB);
+		int category = client.getVarbitValue(VarbitID.COLLECTION_LAST_CATEGORY);
 
 		JsonArray items = new JsonArray();
 		int hash = 1;
@@ -166,7 +167,7 @@ final class CollectionLog
 		{
 			return null;
 		}
-		Widget list = client.getWidget(GROUP, TAB_CONTAINER[tab]);
+		Widget list = client.getWidget(TAB_CONTAINER[tab]);
 		if (list == null)
 		{
 			return null;
@@ -201,7 +202,7 @@ final class CollectionLog
 	 */
 	static boolean isOtherPlayers(Client client)
 	{
-		return client.getVarbitValue(VB_POH_HOST_BOOK_OPEN) == 1;
+		return client.getVarbitValue(VarbitID.COLLECTION_POH_HOST_BOOK_OPEN) == 1;
 	}
 
 	/**

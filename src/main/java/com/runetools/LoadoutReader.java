@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import net.runelite.api.Client;
 import net.runelite.api.EnumComposition;
+import net.runelite.api.EnumID;
 import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
@@ -116,7 +117,7 @@ class LoadoutReader
 
 		// (4) rune pouch (scan all 4 slots; empty slots have type 0)
 		List<GearSetupItem> runes = new ArrayList<>();
-		EnumComposition runeEnum = client.getEnum(982);   // RUNEPOUCH_RUNE enum: pouch-slot type -> rune item id
+		EnumComposition runeEnum = client.getEnum(EnumID.RUNEPOUCH_RUNE);   // pouch-slot type -> rune item id
 		if (runeEnum != null)
 		{
 			for (int i = 0; i < RP_TYPE.length; i++)
