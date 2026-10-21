@@ -2001,7 +2001,8 @@ class RuneToolsPanel extends PluginPanel
 	/**
 	 * Reflect the current character's link state on the primary button so there's always an obvious
 	 * fix when disconnected: it reads "Connect to RuneTools" when unlinked and "Open RuneTools" once
-	 * linked. Both do the same thing (open the site / bootstrap this character's account).
+	 * linked. Both do the same thing: open the site signed in, or start pairing when this character
+	 * has no working key yet.
 	 */
 	void setConnectButton(boolean linked)
 	{

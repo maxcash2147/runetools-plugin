@@ -207,8 +207,13 @@ We follow the same pattern as RuneLite's built-in Grand Exchange plugin and Flip
 These are every request the plugin makes, all to the configured server:
 
 - `POST /api/plugin/web-login` - mint the one-time browser-login code behind **Connect to
-  RuneTools**, creating this character's account + key on first sight
-- `POST /api/plugin/pair`, then `POST /api/plugin/pair/poll` every few seconds - pair this client with an email-locked account (only while you're connecting one)
+  RuneTools** / **Open RuneTools**, for the account this character's stored key already opens. It
+  never creates an account or a key: without a working key the site answers `code: "pair"` and the
+  plugin starts pairing instead (for an account with an email it answers `code: "email_signin"`
+  and the plugin opens the account page)
+- `POST /api/plugin/pair`, then `POST /api/plugin/pair/poll` every few seconds - connect this
+  character by approving its code in the browser (only while you're connecting one); the poll that
+  sees the approval returns the character's key
 - `POST /api/plugin/trades` - completed GE fills (the server dedupes on `ext_id`)
 - `POST /api/plugin/state` - latest-wins snapshot of gp / offers / inventory / bank / skills
 - `GET /api/plugin/setups` (ETag) · `POST` · `PUT /{id}` · `DELETE /{id}` - two-way gear-setup sync
@@ -218,7 +223,8 @@ These are every request the plugin makes, all to the configured server:
 - `GET /api/plugin/bank-layouts` (ETag) · `POST` - pull imported layouts / publish a shared bank tab or whole bank
 - `POST /api/plugin/achievements` - achievements for your Adventurer's Log, a batch at a time
 
-All of them authenticate with `Authorization: Bearer rtk_…`. Keys can be listed and revoked on the
+All of them authenticate with `Authorization: Bearer rtk_…`, except the two pairing requests, which
+carry no key (pairing is how a character without one gets it). Keys can be listed and revoked on the
 site (`/api/auth/keys`, signed in with your RuneTools account).
 
 ## License

@@ -190,10 +190,12 @@ class RuneToolsApiClient
 	}
 
 	/**
-	 * Mint a one-time browser-login code so the user can open the site already signed in - creating a
-	 * site account on first sight (keyed by the game account hash) when they have no key yet. The
-	 * request carries the Bearer key if one is stored; an empty key reads as "no key" server-side.
-	 * Response: {@code {code, url, api_key?}}.
+	 * Mint a one-time browser-login code for the account this character's stored key opens, so the
+	 * user can open the site already signed in. It never creates an account or hands out a key: with
+	 * no working key for this character the site answers 403 {@code code: "pair"} (connect it by
+	 * {@link #pairStart pairing}), and for an account with an email 403 {@code code: "email_signin"}.
+	 * The request carries the Bearer key if one is stored; an empty key reads as "no key" server-side.
+	 * Response: {@code {code, url}}.
 	 */
 	void webLogin(String accountHash, String rsn, Callback callback)
 	{
@@ -208,10 +210,10 @@ class RuneToolsApiClient
 	}
 
 	/**
-	 * Start pairing this client with an account it can't enter on its own (one secured with an
-	 * email, which web-login refuses). Response:
-	 * {@code {poll_token, user_code, url, expires_in, interval}}; the player approves user_code at
-	 * <site>{url} while signed in, and {@link #pairPoll} then hands back this client's key.
+	 * Start pairing: how a character with no working key here gets connected. Sent without a key.
+	 * Response: {@code {poll_token, user_code, url, expires_in, interval}}; a person approves
+	 * user_code at <site>{url} in the browser, and {@link #pairPoll} then hands back this
+	 * character's key.
 	 */
 	void pairStart(String accountHash, String rsn, Callback callback)
 	{

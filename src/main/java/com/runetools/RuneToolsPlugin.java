@@ -3213,10 +3213,14 @@ public class RuneToolsPlugin extends Plugin
 	// -- panel + connection test --------------------------------------------- //
 
 	/**
-	 * One-click "open the site signed in": mint a browser-login code from the plugin's key (or, on a
-	 * brand-new install, bootstrap an account keyed by the game account hash), store any key we're
-	 * issued so future syncs are authenticated, then open the site already logged in. Consent-gated,
-	 * since it links this character's name + account hash to a RuneTools account.
+	 * The panel's "Connect to RuneTools" / "Open RuneTools" button. Asks the site for a one-time
+	 * browser-login code with this character's stored key and opens the site signed in. The site only
+	 * does that for an account the key already opens and that has no email, and it never creates an
+	 * account or hands out a key here. Otherwise it answers 403 with a reason: "email_signin" opens the
+	 * account page (the browser signs in with the email), and anything else ("pair": no working key
+	 * for this character) starts {@link #startPairing pairing}, which a person approves in the
+	 * browser. The game account hash alone never opens an account. Consent-gated, since it links this
+	 * character's name + account hash to a RuneTools account.
 	 */
 	private void openSiteLogin()
 	{
@@ -3285,13 +3289,6 @@ public class RuneToolsPlugin extends Plugin
 							return;
 						}
 						JsonObject o = new JsonParser().parse(RuneToolsApiClient.readBoundedBody(r)).getAsJsonObject();
-						// First run hands us a key; persist it so background syncs are authenticated too.
-						String key = str(o, "api_key", null);
-						if (key != null && key.startsWith("rtk_"))
-						{
-							storeKeyForHash(accountHash, key);   // this character's own key (per-character accounts)
-							updatePanelStatic();   // flip immediately to "Connected as ..." / "Open RuneTools"
-						}
 						String url = str(o, "url", null);
 						// Only ever open a link to our own (configured) server - never an arbitrary URL.
 						final String full = url != null ? api.base() + url : null;
@@ -3320,7 +3317,7 @@ public class RuneToolsPlugin extends Plugin
 		});
 	}
 
-	// -- pairing (a client joining an account secured with an email) -------- //
+	// -- pairing (how every character gets connected and receives its key) -- //
 
 	/** One pending pairing: what to poll with, the code the player checks, and its deadline. */
 	private static final class Pairing
@@ -3345,9 +3342,10 @@ public class RuneToolsPlugin extends Plugin
 	private final AtomicReference<Pairing> pairing = new AtomicReference<>();
 
 	/**
-	 * Ask the site to pair this client, show the code, and open the approve page. The player signs
-	 * in there (with the account's email), checks the code matches and approves; {@link #pollPairing}
-	 * then receives this character's key.
+	 * Ask the site to pair this client, show the code, and open the approve page. There the player
+	 * checks the code matches, then approves it into the account they're signed into, signs in or
+	 * creates one, or continues without an email; {@link #pollPairing} then receives this
+	 * character's key.
 	 */
 	private void startPairing(String accountHash, String rsn)
 	{
