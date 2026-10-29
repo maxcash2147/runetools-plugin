@@ -445,11 +445,14 @@ class SetupManager
 	/**
 	 * Save setups imported from Inventory Setups, one request at a time and a little apart (the site
 	 * allows about 240 plugin requests a minute from one address), then pull once. Stops at a rate
-	 * limit, a full setup list or a rejected key, and reports what was really saved.
+	 * limit, a full setup list or a rejected key, and reports what was really saved. Each setup is only
+	 * sent while the character that started the import can still save (same character in game,
+	 * consent on, signed in, connected): a logout, a switch or consent turned off part way stops it.
 	 */
 	void importMany(List<GearSetup> list)
 	{
-		if (closed || list.isEmpty() || !host.mayWrite())
+		final String forAccount = account;
+		if (closed || forAccount == null || list.isEmpty() || !host.mayWrite())
 		{
 			return;
 		}
@@ -459,10 +462,10 @@ class SetupManager
 			bodies.add(g.toJson());
 		}
 		host.message("Importing " + bodies.size() + " setup" + (bodies.size() == 1 ? "" : "s") + "…", true);
-		importNext(bodies, 0, 0, 0);
+		importNext(forAccount, bodies, 0, 0, 0);
 	}
 
-	private void importNext(List<JsonObject> bodies, int index, int created, int failed)
+	private void importNext(String forAccount, List<JsonObject> bodies, int index, int created, int failed)
 	{
 		if (closed)
 		{
@@ -471,6 +474,11 @@ class SetupManager
 		if (index >= bodies.size())
 		{
 			finishImport(bodies.size(), created, failed, null);
+			return;
+		}
+		if (index > 0 && (!forAccount.equals(account) || !host.mayWrite()))
+		{
+			finishImport(bodies.size(), created, failed, "Import stopped.");
 			return;
 		}
 		api.createSetup(bodies.get(index), new Callback()
@@ -511,11 +519,12 @@ class SetupManager
 				}
 				if (executor != null)
 				{
-					executor.schedule(() -> importNext(bodies, index + 1, c, f), IMPORT_GAP_MS, TimeUnit.MILLISECONDS);
+					executor.schedule(() -> importNext(forAccount, bodies, index + 1, c, f), IMPORT_GAP_MS,
+						TimeUnit.MILLISECONDS);
 				}
 				else
 				{
-					importNext(bodies, index + 1, c, f);
+					importNext(forAccount, bodies, index + 1, c, f);
 				}
 			}
 		});
