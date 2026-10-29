@@ -3389,6 +3389,7 @@ public class RuneToolsPlugin extends Plugin
 			fresh.setStyle(current.getStyle());
 			fresh.setMonsterId(current.getMonsterId());
 			fresh.setCollections(current.getCollections());
+			fresh.setAdditional(current.getAdditional());   // not part of what "Refresh from game" replaces
 			setupManager.pushUpdate(fresh);
 		});
 	}
