@@ -247,6 +247,7 @@ public class RuneToolsPlugin extends Plugin
 	private final AtomicBoolean configInFlight = new AtomicBoolean();
 	private volatile long lastConfigFetchAt;
 	private volatile String lastConfigTag = "";
+	private static final int MAX_CONFIG_TAG = 128;   // a longer config_tag is ignored
 	// A 429's Retry-After, as a "not before" time for every endpoint: the server's rate limit is per IP,
 	// so another endpoint answering fine (or a character switch) doesn't mean the wait is over.
 	private final AtomicLong retryAfterUntilMillis = new AtomicLong();
@@ -1384,7 +1385,7 @@ public class RuneToolsPlugin extends Plugin
 			updatePanelStatic();
 			updateTradesPanel();
 			remindToConnect(name, hash);
-			fetchRemoteConfig(true);
+			fetchRemoteConfig(true, null);
 			// RSN only at DEBUG; never log the persistent account hash (a stable cross-session
 			// correlator) to the on-disk client log users routinely share.
 			log.debug("RuneTools: identity captured for {}", name);
@@ -1750,7 +1751,7 @@ public class RuneToolsPlugin extends Plugin
 		}
 		if (loggedIn && mainGame && config.consent())
 		{
-			fetchRemoteConfig(false);   // the site's settings, every half hour (needs no key)
+			fetchRemoteConfig(false, null);   // the site's settings, every half hour (needs no key)
 		}
 		if (!syncAllowed())
 		{
@@ -1839,11 +1840,13 @@ public class RuneToolsPlugin extends Plugin
 							JsonObject o = new JsonParser().parse(b).getAsJsonObject();
 							liveSetupsTag = str(o, "setups_tag", liveSetupsTag);
 							liveLayoutsTag = str(o, "layouts_tag", liveLayoutsTag);
+							// Kept as sent, like the other two tags, and only once the config was fetched,
+							// so a change the one-minute gap held back is fetched on a later answer.
 							String configTag = str(o, "config_tag", null);
-							if (configTag != null && !configTag.equals(lastConfigTag))
+							if (configTag != null && configTag.length() <= MAX_CONFIG_TAG
+								&& !configTag.equals(lastConfigTag))
 							{
-								lastConfigTag = RemoteConfig.clean(configTag, 64);
-								fetchRemoteConfig(true);
+								fetchRemoteConfig(true, configTag);
 							}
 							if (isTrue(o, "setups"))
 							{
@@ -4534,8 +4537,10 @@ public class RuneToolsPlugin extends Plugin
 	 * Fetch the site's settings: after consent at login ({@code force}, at most once a minute), when
 	 * the live-update answer names a new config_tag ({@code force}), and every config_s (30 minutes)
 	 * otherwise. A 404 or an answer that isn't a JSON object leaves the last good copy in force.
+	 * {@code tag} (the live answer's config_tag, or null) becomes the one sent back once the site has
+	 * answered this fetch; a fetch that doesn't start (the gap, one in flight) leaves it unchanged.
 	 */
-	private void fetchRemoteConfig(boolean force)
+	private void fetchRemoteConfig(boolean force, String tag)
 	{
 		long now = System.currentTimeMillis();
 		long gap = force ? CONFIG_MIN_GAP_MS : remoteConfig.limitMs("config_s");
@@ -4557,6 +4562,10 @@ public class RuneToolsPlugin extends Plugin
 			{
 				try (Response r = resp)
 				{
+					if (tag != null && running)
+					{
+						lastConfigTag = tag;   // the site answered for this tag, whatever it said
+					}
 					if (r.code() != 200 || !running)
 					{
 						return;   // no config on this server (404), or not now: keep what we have
