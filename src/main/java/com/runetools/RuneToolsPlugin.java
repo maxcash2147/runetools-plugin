@@ -83,6 +83,7 @@ import net.runelite.client.chat.ChatMessageManager;
 import net.runelite.client.chat.QueuedMessage;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ClientShutdown;
 import net.runelite.client.plugins.loottracker.LootReceived;
 import net.runelite.http.api.loottracker.LootRecordType;
 import net.runelite.client.game.ItemManager;
@@ -519,6 +520,21 @@ public class RuneToolsPlugin extends Plugin
 		resetSession();
 		navButton = null;
 		// Keep the panel reference: a late callback may still touch it (the api client drops them).
+	}
+
+	/**
+	 * RuneLite exits without switching plugins off, so the writes DebouncedConfig is holding (the
+	 * unsynced-trade queue, the setups cache) go into the config now. This runs before ConfigManager
+	 * saves the config for the last time (its handler has priority -100).
+	 */
+	@Subscribe
+	public void onClientShutdown(ClientShutdown event)
+	{
+		if (running && debounced != null)
+		{
+			savePending();
+			debounced.flush();
+		}
 	}
 
 	/** Forget everything captured from the game this session (plugin start and stop). */
