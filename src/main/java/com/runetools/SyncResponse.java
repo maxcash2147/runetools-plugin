@@ -120,10 +120,14 @@ final class SyncResponse
 		return status >= 400 && status < 500;
 	}
 
-	/** A 5xx: what counts toward giving up on one payload. */
+	/**
+	 * What counts toward giving up on one payload: a 500, the server failing on what it was sent. A
+	 * 502, 503, 504 or a Cloudflare 52x is the site or the way to it being down, which says nothing
+	 * about the payload, so an outage never gives anything up.
+	 */
 	static boolean serverError(int status)
 	{
-		return status >= 500 && status < 600;
+		return status == 500;
 	}
 
 	/** Whether a 2xx body is the shape {@code shape} promises. Never throws. */

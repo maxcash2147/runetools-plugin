@@ -127,9 +127,9 @@ bank tab).
   30 minutes, and when the site says they changed. See [Remote config](#remote-config).
 - **Failures back off per request type**: an endpoint that fails waits 20 seconds, then twice as long
   each time, up to 10 minutes, without slowing the others. A `429`'s `Retry-After` pauses every
-  background sync (capped at an hour). The same upload failing with a server error five times in a
-  row is given up on. A key the server keeps rejecting stops the loop until you reconnect the
-  character.
+  background sync (capped at an hour). An upload the server keeps failing with a `500` (five times
+  in a row, over half an hour) is given up on; an outage (`502`, `503`, `504`) never counts. A key
+  the server keeps rejecting stops the loop until you reconnect the character.
 
 ## Remote config
 

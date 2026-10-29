@@ -1974,9 +1974,10 @@ public class RuneToolsPlugin extends Plugin
 	 *   <li>A name or limit refusal (409, 403 {@code rsn_taken}) holds the endpoint for this identity
 	 *       until the character or key changes, with the server's words for the panel; a 400/413
 	 *       holds that exact payload. Neither is an outage, so neither backs off.</li>
-	 *   <li>Everything else backs this endpoint off on its own. The same payload failing with a 5xx
-	 *       {@link EndpointBackoff#GIVE_UP_AFTER} times is given up on (parked, returned as
-	 *       PAYLOAD_REJECTED so the caller treats it like a refused body).</li>
+	 *   <li>Everything else backs this endpoint off on its own. The same payload failing with a 500
+	 *       {@link EndpointBackoff#GIVE_UP_AFTER} times over half an hour is given up on (parked,
+	 *       returned as PAYLOAD_REJECTED so the caller treats it like a refused body). A request with
+	 *       no payload (payload 0: the setups and layouts pulls) is never given up on, only backed off.</li>
 	 *   <li>A rejected key counts toward stopping the loop, but only for the character in game:
 	 *       {@code foreignKey} marks another character's key (a queued trade of an alt), whose
 	 *       rejection only holds that upload.</li>
@@ -2055,7 +2056,7 @@ public class RuneToolsPlugin extends Plugin
 				{
 					authFailures.set(0);   // "consecutive" rejections: any other answer breaks the streak
 				}
-				if (backoff.failed(endpoint, payload, SyncResponse.serverError(code), now, base, max))
+				if (backoff.failed(endpoint, payload, payload != 0L && SyncResponse.serverError(code), now, base, max))
 				{
 					parking.parkPayload(endpoint, identity, payload);
 					log.debug("RuneTools: {} failed {} times with the same payload - giving up on it", endpoint,

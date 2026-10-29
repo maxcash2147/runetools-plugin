@@ -48,13 +48,38 @@ public class EndpointBackoffTest
 	public void theSamePayloadFailingWithServerErrorsIsGivenUpOn()
 	{
 		EndpointBackoff b = new EndpointBackoff();
-		for (int i = 1; i < EndpointBackoff.GIVE_UP_AFTER; i++)
+		long now = 0L;
+		int tries = 0;
+		boolean gaveUp = false;
+		while (!gaveUp && tries < 50)
 		{
-			Assert.assertFalse(b.failed("x", 42L, true, 0L, BASE, MAX));
+			gaveUp = b.failed("x", 42L, true, now, BASE, MAX);
+			tries++;
+			now = b.nextAt("x");   // the next try, when the backoff allows it
 		}
-		Assert.assertTrue(b.failed("x", 42L, true, 0L, BASE, MAX));
+		Assert.assertTrue(gaveUp);
+		Assert.assertTrue(tries >= EndpointBackoff.GIVE_UP_AFTER);
 		// ...and counting starts over afterwards.
-		Assert.assertFalse(b.failed("x", 42L, true, 0L, BASE, MAX));
+		Assert.assertFalse(b.failed("x", 42L, true, now, BASE, MAX));
+	}
+
+	@Test
+	public void serverErrorsForLessThanHalfAnHourGiveNothingUp()
+	{
+		EndpointBackoff b = new EndpointBackoff();
+		long now = 0L;
+		for (int i = 0; i < 20 && now < EndpointBackoff.GIVE_UP_MIN_MS; i++)
+		{
+			Assert.assertFalse("try " + (i + 1) + " at " + now / 1000 + " s",
+				b.failed("x", 42L, true, now, BASE, MAX));
+			now = b.nextAt("x");
+		}
+		// Five errors a second apart, as a burst of retries would give, are not half an hour either.
+		EndpointBackoff c = new EndpointBackoff();
+		for (int i = 0; i < 10; i++)
+		{
+			Assert.assertFalse(c.failed("y", 7L, true, i * 1_000L, BASE, MAX));
+		}
 	}
 
 	@Test

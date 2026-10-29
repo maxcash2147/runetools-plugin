@@ -9,15 +9,18 @@ import java.util.concurrent.ConcurrentHashMap;
  * or every tick, while the endpoints that work carry on at the normal pace.
  *
  * <p>Each failure doubles that endpoint's wait, from {@code baseMs} up to {@code maxMs}; a success
- * clears it. The same payload failing with a server error {@link #GIVE_UP_AFTER} times in a row is
- * given up on: the caller stops sending exactly that payload, so one body the server chokes on can't
- * keep a queue stuck forever. Plain logic with the clock passed in, so it can be unit-tested;
- * thread-safe.
+ * clears it. The same payload failing with a server error {@link #GIVE_UP_AFTER} times in a row, over
+ * at least {@link #GIVE_UP_MIN_MS}, is given up on: the caller stops sending exactly that payload, so
+ * one body the server chokes on can't keep a queue stuck forever, while a server that is down for a
+ * while (a deploy, a database restart) costs nothing. Plain logic with the clock passed in, so it can
+ * be unit-tested; thread-safe.
  */
 final class EndpointBackoff
 {
 	/** Server errors in a row on the same payload before the caller gives up on it. */
 	static final int GIVE_UP_AFTER = 5;
+	/** ...and how long they must have gone on for, from the first. */
+	static final long GIVE_UP_MIN_MS = 30L * 60L * 1000L;
 
 	private static final class State
 	{
@@ -25,6 +28,7 @@ final class EndpointBackoff
 		long nextAt;
 		long payload;
 		int payloadErrors;
+		long payloadSince;
 	}
 
 	private final Map<String, State> states = new ConcurrentHashMap<>();
@@ -44,9 +48,10 @@ final class EndpointBackoff
 	}
 
 	/**
-	 * Record a failure and push the endpoint's next try back. {@code serverError} marks a 5xx, which
-	 * counts toward giving up on {@code payload}; a transport failure, a 404 or a rate limit never does.
-	 * Returns true when the caller should give up on this exact payload.
+	 * Record a failure and push the endpoint's next try back. {@code serverError} marks a failure that
+	 * counts toward giving up on {@code payload} (see {@link SyncResponse#serverError}); a transport
+	 * failure, an outage, a 404 or a rate limit never does. Returns true when the caller should give up
+	 * on this exact payload.
 	 */
 	boolean failed(String endpoint, long payload, boolean serverError, long now, long baseMs, long maxMs)
 	{
@@ -68,8 +73,9 @@ final class EndpointBackoff
 			{
 				s.payload = payload;
 				s.payloadErrors = 1;
+				s.payloadSince = now;
 			}
-			if (s.payloadErrors >= GIVE_UP_AFTER)
+			if (s.payloadErrors >= GIVE_UP_AFTER && now - s.payloadSince >= GIVE_UP_MIN_MS)
 			{
 				s.payloadErrors = 0;
 				return true;

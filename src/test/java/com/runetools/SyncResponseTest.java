@@ -103,10 +103,13 @@ public class SyncResponseTest
 	}
 
 	@Test
-	public void serverErrorsAreFiveHundreds()
+	public void onlyAFiveHundredCountsTowardGivingUp()
 	{
 		Assert.assertTrue(SyncResponse.serverError(500));
-		Assert.assertTrue(SyncResponse.serverError(503));
+		for (int outage : new int[]{502, 503, 504, 520, 521, 522, 524})
+		{
+			Assert.assertFalse("an outage says nothing about the payload: " + outage, SyncResponse.serverError(outage));
+		}
 		Assert.assertFalse(SyncResponse.serverError(404));
 		Assert.assertFalse(SyncResponse.serverError(0));
 	}
