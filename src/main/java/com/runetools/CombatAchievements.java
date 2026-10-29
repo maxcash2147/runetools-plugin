@@ -2,6 +2,8 @@ package com.runetools;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import java.util.concurrent.atomic.AtomicBoolean;
+import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.EnumComposition;
 import net.runelite.api.StructComposition;
@@ -17,16 +19,23 @@ import net.runelite.api.gameval.VarbitID;
  * <ul>
  *   <li>one int-enum of task struct ids per tier ({@link #TIER_ENUMS});</li>
  *   <li>struct params for id/name/desc/tier/type/monster;</li>
- *   <li>completion is a bitmap packed across 20 VarPlayers ({@link #COMPLETION_VARPS}), indexed by
+ *   <li>completion is a bitmap packed across 21 VarPlayers ({@link #COMPLETION_VARPS}), indexed by
  *       the task's global id (param 1306): {@code varp[id/32] bit (id%32)}.</li>
  * </ul>
+ *
+ * <p>Those varps reach task id 671. A task past that (one a game update adds before RuneLite names the
+ * next varp) can't be read, so it is sent in {@code unknown} rather than as not done, the panel leaves
+ * it out of the counts, and the client log says so once.
  *
  * <p>{@link #read} must run on the client thread; the cache structs only resolve while logged in.
  * Task counts and tier point thresholds change with game updates, so everything is enumerated at
  * runtime - only the ids here are hard-coded.
  */
+@Slf4j
 final class CombatAchievements
 {
+	private static final AtomicBoolean LOGGED_UNREADABLE = new AtomicBoolean();
+
 	// One enum of task struct ids per tier, in tier order (points = tier index + 1).
 	private static final int[] TIER_ENUMS = {3981, 3982, 3983, 3984, 3985, 3986};
 	static final String[] TIER_NAMES = {"easy", "medium", "hard", "elite", "master", "grandmaster"};
@@ -68,6 +77,7 @@ final class CombatAchievements
 	{
 		final JsonArray tasks;
 		final JsonArray completed;
+		final JsonArray unknown;   // task ids whose completion can't be read (past the known varps)
 		final JsonObject tiers;
 		final int completedHash;
 		// Per-tier stats (index = tier order) for the in-plugin progress display.
@@ -76,11 +86,12 @@ final class CombatAchievements
 		final int[] tierEarnedPts;
 		final int[] tierPossiblePts;
 
-		Snapshot(JsonArray tasks, JsonArray completed, JsonObject tiers, int completedHash,
+		Snapshot(JsonArray tasks, JsonArray completed, JsonArray unknown, JsonObject tiers, int completedHash,
 				 int[] tierDone, int[] tierTotal, int[] tierEarnedPts, int[] tierPossiblePts)
 		{
 			this.tasks = tasks;
 			this.completed = completed;
+			this.unknown = unknown;
 			this.tiers = tiers;
 			this.completedHash = completedHash;
 			this.tierDone = tierDone;
@@ -123,6 +134,7 @@ final class CombatAchievements
 	{
 		JsonArray tasks = new JsonArray();
 		JsonArray completed = new JsonArray();
+		JsonArray unknown = new JsonArray();
 		int[] tierDone = new int[TIER_ENUMS.length];
 		int[] tierTotal = new int[TIER_ENUMS.length];
 		int[] tierEarnedPts = new int[TIER_ENUMS.length];
@@ -177,12 +189,16 @@ final class CombatAchievements
 					t.addProperty("description", desc);
 				}
 				tasks.add(t);
+				int vi = id / 32, bit = id % 32;
+				if (!readable(id))
+				{
+					unknown.add(id);
+					hash = hash * 31 - id - 1;
+					continue;   // not counted as done or not done
+				}
 				tierTotal[ti]++;
 				tierPossiblePts[ti] += ti + 1;
-
-				int vi = id / 32, bit = id % 32;
-				if (vi >= 0 && vi < COMPLETION_VARPS.length
-					&& (client.getVarpValue(COMPLETION_VARPS[vi]) & (1 << bit)) != 0)
+				if ((client.getVarpValue(COMPLETION_VARPS[vi]) & (1 << bit)) != 0)
 				{
 					completed.add(id);
 					tierDone[ti]++;
@@ -196,12 +212,23 @@ final class CombatAchievements
 		{
 			return null;
 		}
+		if (unknown.size() > 0 && LOGGED_UNREADABLE.compareAndSet(false, true))
+		{
+			log.info("RuneTools: {} Combat Achievement task(s) past id {} can't be read yet; sent as unknown",
+				unknown.size(), COMPLETION_VARPS.length * 32 - 1);
+		}
 		JsonObject tiers = new JsonObject();
 		for (int i = 0; i < TIER_NAMES.length; i++)
 		{
 			tiers.addProperty(TIER_NAMES[i], tierDone[i]);
 		}
-		return new Snapshot(tasks, completed, tiers, hash, tierDone, tierTotal, tierEarnedPts, tierPossiblePts);
+		return new Snapshot(tasks, completed, unknown, tiers, hash, tierDone, tierTotal, tierEarnedPts, tierPossiblePts);
+	}
+
+	/** Whether a task's completion bit lies in a varp this build knows. */
+	static boolean readable(int taskId)
+	{
+		return taskId >= 0 && taskId / 32 < COMPLETION_VARPS.length;
 	}
 
 	private static EnumComposition safeEnum(Client client, int id)

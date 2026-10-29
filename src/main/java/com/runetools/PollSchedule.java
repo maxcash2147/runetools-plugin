@@ -30,7 +30,20 @@ final class PollSchedule
 
 	private long nextAt;                  // first moment the next poll may start; 0 = due now
 	private long lastStartedAt = -1;      // -1 = never polled since the last reset
+	private long minMs = MIN_INTERVAL_MS;
+	private long maxMs = MAX_INTERVAL_MS;
 	private long interval = MIN_INTERVAL_MS;
+
+	/**
+	 * Use these bounds instead of the built-in ones (the site's remote config may lengthen them; it
+	 * never shortens them, see {@link RemoteConfig#limitMs}).
+	 */
+	synchronized void setBounds(long minIntervalMs, long maxIntervalMs)
+	{
+		minMs = Math.max(MIN_INTERVAL_MS, minIntervalMs);
+		maxMs = Math.max(minMs, Math.max(MAX_INTERVAL_MS, maxIntervalMs));
+		interval = Math.max(minMs, Math.min(interval, maxMs));
+	}
 
 	/**
 	 * If a poll is due at {@code now}, record that it is starting and return true; the caller then
@@ -45,17 +58,17 @@ final class PollSchedule
 		}
 		lastStartedAt = now;
 		nextAt = now + interval;
-		interval = Math.min(MAX_INTERVAL_MS, interval * 2);
+		interval = Math.min(maxMs, interval * 2);
 		return true;
 	}
 
 	/** A poll found something changed on the site: keep polling at the short gap for a while. */
 	synchronized void onChanged()
 	{
-		interval = MIN_INTERVAL_MS;
+		interval = minMs;
 		if (lastStartedAt >= 0)
 		{
-			nextAt = Math.min(nextAt, lastStartedAt + MIN_INTERVAL_MS);
+			nextAt = Math.min(nextAt, lastStartedAt + minMs);
 		}
 	}
 
@@ -76,7 +89,7 @@ final class PollSchedule
 	{
 		nextAt = 0;
 		lastStartedAt = -1;
-		interval = MIN_INTERVAL_MS;
+		interval = minMs;
 	}
 
 	/** When the next poll may start (for tests and debug logging). */

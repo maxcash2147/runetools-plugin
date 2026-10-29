@@ -7,6 +7,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.IntUnaryOperator;
 import lombok.extern.slf4j.Slf4j;
@@ -413,22 +414,30 @@ class BankOrganizer
 	 * Turn a native bank tab's exact contents (item ids in tab order, passed in by the caller) into a
 	 * standalone Bank Tags tag + layout + tab named {@code name}. This is a user-owned tag - it is NOT
 	 * tracked in {@link #KEY_OWNED}, so Rebuild/Remove never touch it - and it can be shared straight
-	 * away via core Bank Tags' right-click "Export tag tab".
+	 * away via core Bank Tags' right-click "Export tag tab". The name is sanitised like any tag name,
+	 * and a tag that already exists is never overwritten: the player is asked for another name.
+	 * {@code onStatus} gets a status line and whether it is good news.
 	 */
-	void saveTabAsTag(String name, List<Integer> ids, Consumer<String> onStatus)
+	void saveTabAsTag(String name, List<Integer> ids, BiConsumer<String, Boolean> onStatus)
 	{
 		clientThread.invoke(() ->
 		{
 			if (ids.isEmpty())
 			{
-				if (onStatus != null)
-				{
-					onStatus.accept("That bank tab is empty - nothing to save.");
-				}
+				onStatus.accept("That bank tab is empty.", false);
 				return;
 			}
-			String tag = name.trim();
-			tagManager.removeTag(tag);                 // overwrite if a tag with this name already exists
+			String tag = sanitizeTagName(name);
+			if (tag.isEmpty())
+			{
+				onStatus.accept("Enter a name for the tag.", false);
+				return;
+			}
+			if (tagExists(tag))
+			{
+				onStatus.accept("A tag named \"" + tag + "\" already exists. Pick another name.", false);
+				return;
+			}
 			List<Integer> canon = new ArrayList<>();
 			for (int id : ids)
 			{
@@ -447,12 +456,25 @@ class BankOrganizer
 			tabManager.save();
 			bankTags.openBankTag(tag, BankTagsService.OPTION_ALLOW_MODIFICATIONS);
 			log.debug("RuneTools: saved bank tab as tag \"{}\" ({} items)", tag, canon.size());
-			if (onStatus != null)
-			{
-				onStatus.accept("Saved as tag \"" + tag + "\". In the bank, right-click its tab "
-					+ "-> Export tag tab to share it.");
-			}
+			onStatus.accept("Saved as tag \"" + tag + "\".", true);
 		});
+	}
+
+	/** Whether a Bank Tags tab or tag with this name already exists. Client thread. */
+	private boolean tagExists(String tag)
+	{
+		if (tabManager.find(tag) != null)
+		{
+			return true;
+		}
+		try
+		{
+			return !tagManager.getItemsForTag(tag).isEmpty();
+		}
+		catch (RuntimeException ex)
+		{
+			return false;
+		}
 	}
 
 	/**

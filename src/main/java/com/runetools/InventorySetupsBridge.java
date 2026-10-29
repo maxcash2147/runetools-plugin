@@ -177,6 +177,30 @@ public final class InventorySetupsBridge
 		return portable.toString();
 	}
 
+	/**
+	 * Every setup as one file Inventory Setups' "Mass Import Setups" reads: a JSON array of the same
+	 * objects its single-setup Import takes.
+	 */
+	public static String toMassExport(List<GearSetup> setups)
+	{
+		StringBuilder sb = new StringBuilder("[");
+		int n = 0;
+		for (GearSetup s : setups)
+		{
+			String one = toImportString(s);
+			if (one == null)
+			{
+				continue;
+			}
+			if (n++ > 0)
+			{
+				sb.append(',');
+			}
+			sb.append(one);
+		}
+		return sb.append(']').toString();
+	}
+
 	/** One item list element: JSON null for an empty/absent item, else {id,q?,f?}. */
 	private static JsonElement itemElement(Integer id, int qty, GearSetup s, Integer fuzzyId)
 	{

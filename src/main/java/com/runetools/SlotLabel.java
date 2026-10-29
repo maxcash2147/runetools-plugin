@@ -30,6 +30,7 @@ final class SlotLabel extends JPanel
 	private final JLabel fuzzyStar = new JLabel();
 	private final JPopupMenu menu = new JPopupMenu();
 	private int itemId = -1;
+	private int qty;
 
 	SlotLabel(Color bg)
 	{
@@ -76,13 +77,28 @@ final class SlotLabel extends JPanel
 	void setItem(ItemManager itemManager, int id, int qty)
 	{
 		this.itemId = id;
+		this.qty = Math.max(1, qty);
 		if (itemManager == null || id <= 0)
 		{
 			clear();
 			return;
 		}
-		itemManager.getImage(id, qty, qty > 1).addTo(image);
-		setToolTipText("Item " + id + (qty > 1 ? " x" + qty : ""));
+		itemManager.getImage(id, this.qty, this.qty > 1).addTo(image);
+		setToolTipText(qty > 1 ? "x" + String.format("%,d", this.qty) : null);   // the name follows (setName)
+	}
+
+	/** Put the item's name in the tooltip, once it has been looked up, if the slot still holds it. */
+	void setName(int forId, String name)
+	{
+		if (forId == itemId && itemId > 0 && name != null && !name.isEmpty())
+		{
+			setToolTipText(name + (qty > 1 ? " x" + String.format("%,d", qty) : ""));
+		}
+	}
+
+	int getQty()
+	{
+		return itemId > 0 ? qty : 0;
 	}
 
 	/** Render a non-item sprite (e.g. a spellbook icon). */
@@ -112,6 +128,7 @@ final class SlotLabel extends JPanel
 	{
 		image.setIcon(null);
 		itemId = -1;
+		qty = 0;
 		setToolTipText(null);
 		fuzzyStar.setText("");
 	}

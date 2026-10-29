@@ -31,6 +31,8 @@ public class GearSetup
 	private Set<Integer> fuzzy = new HashSet<>();                   // item ids matched by variation
 	private String notes;
 	private long updatedAt;
+	// The site's setup collections this setup sits in (none for most setups). Read only: the site owns them.
+	private List<SetupCollection> collections = new ArrayList<>();
 
 	public boolean isFuzzy(int itemId)
 	{
@@ -183,6 +185,7 @@ public class GearSetup
 			}
 		}
 		s.notes = str(o, "notes");
+		s.collections = SetupCollection.parse(o);
 		return s;
 	}
 

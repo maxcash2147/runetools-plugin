@@ -24,6 +24,7 @@ import java.awt.event.FocusEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -32,7 +33,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
-import java.util.function.IntConsumer;
 import java.util.function.LongConsumer;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -59,6 +59,7 @@ import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.util.Filepath;
 import net.runelite.client.util.LinkBrowser;
 
 /**
@@ -72,8 +73,18 @@ class RuneToolsPanel extends PluginPanel
 	private static final Color BLANK = ColorScheme.DARK_GRAY_COLOR;    // corner/placeholder cells blend in
 	private static final Color SLOT = ColorScheme.DARKER_GRAY_COLOR;   // real slots read as darker boxes
 
-	// Community: the Discord invite + Discord's brand "blurple" for the panel's Discord button.
-	private static final String DISCORD_URL = "https://discord.gg/MNUQRU3Kmw";
+	// Community: the site's Discord link (it redirects to the current invite, so an expired invite can be
+	// replaced without a plugin update) + Discord's brand "blurple" for the panel's Discord button.
+	private static final String DISCORD_URL = "https://runetools.com/discord";
+
+	// View titles, in sentence case like the site's own pages.
+	private static final String TITLE_TRADES = "My trades";
+	private static final String TITLE_SETUPS = "My setups";
+	private static final String TITLE_BANK = "Bank layouts";
+	private static final String TITLE_CA = "Combat Achievements";
+	private static final String TITLE_CLOG = "Collection Log";
+	private static final String CA_WAITING = "Not read yet.";
+	private static final String CLOG_WAITING = "Open your Collection Log in-game.";
 	private static final Color DISCORD_BLURPLE = new Color(0x58, 0x65, 0xF2);
 	private static final Color DISCORD_BLURPLE_HOVER = new Color(0x6E, 0x7A, 0xF5);
 	private static final String[] SPELLBOOK_NAMES = {"Standard", "Ancient", "Lunar", "Arceuus"};
@@ -222,7 +233,15 @@ class RuneToolsPanel extends PluginPanel
 	// status/linked carry server-supplied strings (display name, linked RSNs) - disable Swing's
 	// auto-HTML so a "<html><img src=...>" value can't beacon the user's IP (see noHtml()). The status
 	// line is the exception: it needs HTML to wrap, so every message is escaped first (wrapped()).
+	// The status line is background sync health (home view); what the player's own actions did goes in
+	// the message strip, which every view shows until it is dismissed or the next action replaces it.
 	private final JLabel status = new JLabel(wrapped("Not connected", STATUS_WIDTH));
+	private final JPanel messageStrip = new JPanel(new BorderLayout(4, 0));
+	private final JLabel messageLabel = new JLabel(" ");
+	private final JPanel noticeStrip = new JPanel(new BorderLayout(4, 0));
+	private final JLabel noticeLabel = new JLabel(" ");
+	private final JButton noticeLink = new JButton("Open");
+	private volatile Runnable onNoticeLink = () -> { };
 	private final JLabel linked = noHtml(new JLabel(" "));
 	private final JLabel pending = new JLabel("0 unsynced trades");
 	private final JLabel lastSync = new JLabel("Last sync: never");
@@ -234,7 +253,7 @@ class RuneToolsPanel extends PluginPanel
 	private final Consumer<String> onAddCurrent;
 	private final Consumer<GearSetup> onUpdateFromGear;
 	private final Consumer<GearSetup> onPush;
-	private Consumer<GearSetup> onImportSetup = s -> { };   // create a setup imported from Inventory Setups
+	private final Consumer<List<GearSetup>> onImportSetups;   // save setups imported from Inventory Setups
 	private final LongConsumer onDelete;
 	private final SlotEditor editor;
 	private final Runnable onOpenHistory;
@@ -247,19 +266,19 @@ class RuneToolsPanel extends PluginPanel
 	private volatile Runnable onOpened = () -> { };
 
 	private final JPanel bankSection = new JPanel();
-	// bankStatus echoes imported-layout names (server-supplied): escaped before it is shown (wrapped()).
-	private final JLabel bankStatus = new JLabel(" ");
 
 	private final JPanel caSection = new JPanel();
-	private final JLabel caOverall = new JLabel("Waiting for a Combat Achievements read…");
+	private final JLabel caGate = new JLabel(" ");   // why nothing syncs here, when nothing does
+	private final JLabel caOverall = new JLabel(wrapped(CA_WAITING, STATUS_WIDTH));
 	private final JLabel caNextTier = new JLabel(" ");
 	private final JPanel caTiersPanel = new JPanel();
 
 	private final JPanel collectionSection = new JPanel();
-	private final JLabel clogOverall = new JLabel("Open your Collection Log in-game to sync it.");
+	private final JLabel clogGate = new JLabel(" ");
+	private final JLabel clogOverall = new JLabel(wrapped(CLOG_WAITING, STATUS_WIDTH));
 	private final JProgressBar clogOverallBar = new JProgressBar();
 	private final JPanel clogTabsPanel = new JPanel();
-	private final JLabel clogHint = new JLabel(" ");   // static HTML hint (not server text)
+	private final JLabel clogHint = new JLabel(" ");
 
 	private final JLabel missingLabel = new JLabel(" ", JLabel.CENTER);
 	private BiConsumer<GearSetup, Consumer<MissingResult>> missingComputer;
@@ -274,7 +293,7 @@ class RuneToolsPanel extends PluginPanel
 	private final JPanel backBar = new JPanel();
 	private final JLabel backTitle = new JLabel();
 	private final JPanel overviewPanel = new JPanel();
-	private final JButton addCurrent = new JButton("+ Add current setup");
+	private final JButton addCurrent = new JButton("Add current");
 	private final JPanel setupsTools = new JPanel();   // holds addCurrent + the Inventory Setups sync buttons
 
 	private final JPanel detailPanel = new JPanel(new GridBagLayout());
@@ -292,6 +311,7 @@ class RuneToolsPanel extends PluginPanel
 	private final JTextArea notesArea = new JTextArea(4, 0);
 
 	private BufferedImage[] spellbookIcons;
+	private final Map<Integer, String> itemNames = new HashMap<>();   // EDT only: names already looked up
 	private GearSetup current;
 	private long activeSetupId = -1;
 	private List<GearSetup> lastSetups = Collections.emptyList();
@@ -301,9 +321,9 @@ class RuneToolsPanel extends PluginPanel
 				   Consumer<GearSetup> onUpdateFromGear, Consumer<GearSetup> onPush, LongConsumer onDelete,
 				   SlotEditor editor, Runnable onOpenHistory, Runnable onOrganizeBank, Runnable onRemoveTabs,
 				   Consumer<String> onConvertTab, Runnable onExportTag, Runnable onOpenSite, Runnable onCheckDps,
-				   Consumer<GearSetup> onImportSetup)
+				   Consumer<List<GearSetup>> onImportSetups)
 	{
-		this.onImportSetup = onImportSetup;
+		this.onImportSetups = onImportSetups;
 		this.onFilter = onFilter;
 		this.onClearFilter = onClearFilter;
 		this.itemManager = itemManager;
@@ -329,12 +349,6 @@ class RuneToolsPanel extends PluginPanel
 		title.setForeground(ColorScheme.BRAND_ORANGE);
 		title.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-		JLabel blurb = new JLabel("<html>Syncs your GE trades and account to runetools.com, and your "
-			+ "saved gear setups back into the game.</html>");
-		blurb.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		blurb.setAlignmentX(Component.LEFT_ALIGNMENT);
-		blurb.setBorder(BorderFactory.createEmptyBorder(3, 0, 0, 0));
-
 		// Stacked rather than a grid, so a status message that wraps onto a second line gets the room.
 		JPanel rows = new JPanel();
 		rows.setLayout(new BoxLayout(rows, BoxLayout.Y_AXIS));
@@ -354,17 +368,17 @@ class RuneToolsPanel extends PluginPanel
 		rows.setAlignmentX(Component.LEFT_ALIGNMENT);
 
 		signIn = flatButton("Open RuneTools  ↗");
-		signIn.setToolTipText("<html>Open runetools.com signed in as this character.<br>"
-			+ "First time: approve it in your browser - sign in, create an account, or continue without an email.</html>");
+		signIn.setToolTipText("Open runetools.com signed in as this character. The first time, approve it in your browser.");
 		signIn.addActionListener(e -> onOpenSite.run());
 
-		JButton dps = flatButton("Check RuneTools DPS");
-		dps.setToolTipText("Open the RuneTools DPS calculator pre-filled with the gear you're currently wearing.");
+		JButton dps = flatButton("Check DPS");
+		dps.setToolTipText("Open the DPS calculator with the gear you're wearing.");
 		dps.addActionListener(e -> onCheckDps.run());
 
 		JButton discord = discordButton();
 
 		addCurrent.setAlignmentX(Component.LEFT_ALIGNMENT);
+		addCurrent.setToolTipText("Save what you're wearing and carrying as a new setup.");
 		addCurrent.addActionListener(e ->
 		{
 			String name = JOptionPane.showInputDialog(this, "Setup name:", "New setup", JOptionPane.PLAIN_MESSAGE);
@@ -389,7 +403,6 @@ class RuneToolsPanel extends PluginPanel
 		homeHeader.setLayout(new BoxLayout(homeHeader, BoxLayout.Y_AXIS));
 		homeHeader.setAlignmentX(Component.LEFT_ALIGNMENT);
 		homeHeader.add(title);
-		homeHeader.add(blurb);
 		homeHeader.add(rows);
 		homeHeader.add(signIn);
 		homeHeader.add(Box.createVerticalStrut(5));
@@ -403,15 +416,15 @@ class RuneToolsPanel extends PluginPanel
 		homeMenu.setLayout(new BoxLayout(homeMenu, BoxLayout.Y_AXIS));
 		homeMenu.setAlignmentX(Component.LEFT_ALIGNMENT);
 		homeMenu.setBorder(BorderFactory.createEmptyBorder(12, 0, 0, 0));
-		homeMenu.add(menuCard("Grand Exchange", "Session P/L, recent flips & open offers", this::showTrades));
+		homeMenu.add(menuCard(TITLE_TRADES, this::showTrades));
 		homeMenu.add(Box.createVerticalStrut(8));
-		homeMenu.add(menuCard("Gear Setups", "Filter your bank to a saved loadout", this::showSetups));
+		homeMenu.add(menuCard(TITLE_SETUPS, this::showSetups));
 		homeMenu.add(Box.createVerticalStrut(8));
-		homeMenu.add(menuCard("Bank Organizer", "One-click sort your bank into category tabs", this::showBank));
+		homeMenu.add(menuCard(TITLE_BANK, this::showBank));
 		homeMenu.add(Box.createVerticalStrut(8));
-		homeMenu.add(menuCard("Combat Achievements", "Tier progress, points & your plan", this::showCa));
+		homeMenu.add(menuCard(TITLE_CA, this::showCa));
 		homeMenu.add(Box.createVerticalStrut(8));
-		homeMenu.add(menuCard("Collection Log", "Sync a browsable replica to the site", this::showCollection));
+		homeMenu.add(menuCard(TITLE_CLOG, this::showCollection));
 		homeMenu.add(Box.createVerticalStrut(8));
 
 		// Back bar for the sub-pages.
@@ -427,6 +440,8 @@ class RuneToolsPanel extends PluginPanel
 		backBar.add(homeBack, BorderLayout.WEST);
 		backBar.add(backTitle, BorderLayout.CENTER);
 
+		body.add(buildNoticeStrip());
+		body.add(buildMessageStrip());
 		body.add(homeHeader);
 		body.add(homeMenu);
 		body.add(backBar);
@@ -434,12 +449,12 @@ class RuneToolsPanel extends PluginPanel
 		body.add(buildBankSection());
 		body.add(buildCaSection());
 		body.add(buildCollectionSection());
-		JButton importIs = flatButton("Import from Inventory Setups");
-		importIs.setToolTipText("Paste a setup you exported from the Inventory Setups plugin to add it here.");
+		JButton importIs = flatButton("Import setups");
+		importIs.setToolTipText("Paste a setup copied with Inventory Setups' Export.");
 		importIs.addActionListener(e -> doImportFromInventorySetups());
-		JButton copyAllIs = flatButton("Copy all for Inventory Setups");
-		copyAllIs.setToolTipText("Copy every setup as an Inventory Setups import string, to paste into that plugin.");
-		copyAllIs.addActionListener(e -> doCopyAllToInventorySetups());
+		JButton copyAllIs = flatButton("Export all");
+		copyAllIs.setToolTipText("Save every setup to a file for Inventory Setups' Mass Import.");
+		copyAllIs.addActionListener(e -> doExportAllToFile());
 		setupsTools.setLayout(new BoxLayout(setupsTools, BoxLayout.Y_AXIS));
 		setupsTools.setAlignmentX(Component.LEFT_ALIGNMENT);
 		setupsTools.add(addCurrent);
@@ -482,9 +497,7 @@ class RuneToolsPanel extends PluginPanel
 
 		// header rows 2-3: two readable rows of actions - [Refresh | Filter] then [Rename | Delete]
 		JButton refresh = new JButton("↻ Refresh");
-		refresh.setToolTipText("<html>Update this setup to match what you're wearing and carrying "
-			+ "<b>right now</b>: worn gear, inventory, rune pouch, quiver and spellbook. Your name, "
-			+ "notes and fuzzy flags are kept.</html>");
+		refresh.setToolTipText("Replace the gear, inventory, rune pouch, quiver and spellbook with what you have now.");
 		refresh.addActionListener(e ->
 		{
 			if (current == null)
@@ -538,8 +551,8 @@ class RuneToolsPanel extends PluginPanel
 		JPanel manageBtns = new JPanel(new GridLayout(1, 0, 4, 0));   // Rename | Delete
 		manageBtns.add(rename);
 		manageBtns.add(delete);
-		JButton isCopy = flatButton("Copy for Inventory Setups");
-		isCopy.setToolTipText("Copy this setup as an Inventory Setups import string, to paste into that plugin's Import.");
+		JButton isCopy = flatButton("Copy setup");
+		isCopy.setToolTipText("Copy for Inventory Setups' Import.");
 		isCopy.addActionListener(e ->
 		{
 			if (current != null)
@@ -554,13 +567,13 @@ class RuneToolsPanel extends PluginPanel
 			final int idx = i;
 			wireMenu(inventoryGrid.slot(i), "Inventory",
 				target -> editor.readInvSlot(idx, target),
-				id -> setInv(idx, id), () -> setInv(idx, -1));
+				(id, q) -> setInv(idx, id, q), () -> setInv(idx, -1, 0), true);
 		}
 		for (int i = 0; i < runePouchGrid.count(); i++)
 		{
 			final int idx = i;
 			wireMenu(runePouchGrid.slot(i), null, null,
-				id -> setPouch(idx, id), () -> setPouch(idx, -1));
+				(id, q) -> setPouch(idx, id, q), () -> setPouch(idx, -1, 0), true);
 		}
 		additionalGrid.setBackground(BLANK);
 
@@ -686,7 +699,7 @@ class RuneToolsPanel extends PluginPanel
 					EquipmentInventorySlot es = EQUIP_SLOT.get(k);
 					wireMenu(s, "Equipment",
 						target -> editor.readEquipSlot(es.getSlotIdx(), target),
-						id -> setEquip(k, id), () -> setEquip(k, -1));
+						(id, q) -> setEquip(k, id), () -> setEquip(k, -1), false);
 					eq.add(s);
 				}
 			}
@@ -704,11 +717,12 @@ class RuneToolsPanel extends PluginPanel
 
 	/**
 	 * Build the standard right-click menu for a slot. {@code containerRead}==null omits the
-	 * update-from-container item. Async results (item search / live-container reads) are guarded so a
-	 * pick that arrives after the user has navigated to a different setup never writes into the wrong one.
+	 * update-from-container item; {@code quantities} adds "Set quantity" (equipment stores no
+	 * quantity). Async results (item search / live-container reads) are guarded so a pick that arrives
+	 * after the user has navigated to a different setup never writes into the wrong one.
 	 */
-	private void wireMenu(SlotLabel slot, String container, Consumer<IntConsumer> containerRead,
-						  IntConsumer setter, Runnable remove)
+	private void wireMenu(SlotLabel slot, String container, Consumer<SlotEditor.ItemPick> containerRead,
+						  SlotEditor.ItemPick setter, Runnable remove, boolean quantities)
 	{
 		JPopupMenu m = slot.menu();
 		m.removeAll();
@@ -739,26 +753,96 @@ class RuneToolsPanel extends PluginPanel
 		{
 			if (current != null)
 			{
-				editor.searchItem("Set slot to", guarded(setter));
+				final int had = slot.getItemId();
+				final int hadQty = slot.getQty();
+				// A search picks an item, not an amount: keep the slot's amount when it's the same item.
+				editor.searchItem("Set slot to", guarded((id, q) -> setter.accept(id, id == had ? hadQty : q)));
 			}
 		});
 		m.add(us);
+		if (quantities)
+		{
+			JMenuItem qty = new JMenuItem("Set quantity");
+			qty.addActionListener(e ->
+			{
+				if (current == null || slot.getItemId() <= 0)
+				{
+					return;
+				}
+				final int id = slot.getItemId();
+				String in = JOptionPane.showInputDialog(this, "Quantity:", String.valueOf(Math.max(1, slot.getQty())));
+				Integer q = parseQty(in);
+				if (q != null && current != null && slot.getItemId() == id)
+				{
+					setter.accept(id, q);
+				}
+				else if (in != null && q == null)
+				{
+					showMessage("Enter a whole number from 1 to 2,147,483,647.", false);
+				}
+			});
+			m.add(qty);
+		}
 		JMenuItem rm = new JMenuItem("Remove Item from Slot");
 		rm.addActionListener(e -> remove.run());
 		m.add(rm);
 	}
 
+	/** A typed quantity, or null when it isn't a whole number from 1 up. Commas are allowed. */
+	static Integer parseQty(String in)
+	{
+		if (in == null)
+		{
+			return null;
+		}
+		String t = in.trim().replace(",", "");
+		if (t.isEmpty() || t.length() > 10 || !t.chars().allMatch(Character::isDigit))
+		{
+			return null;
+		}
+		long v = Long.parseLong(t);
+		return v >= 1 && v <= Integer.MAX_VALUE ? (int) v : null;
+	}
+
 	/** Wrap a setter so a late async result only applies if the setup that started it is still open. */
-	private IntConsumer guarded(IntConsumer setter)
+	private SlotEditor.ItemPick guarded(SlotEditor.ItemPick setter)
 	{
 		final long forId = current != null ? current.getId() : Long.MIN_VALUE;
-		return id ->
+		return (id, q) ->
 		{
 			if (current != null && current.getId() == forId)
 			{
-				setter.accept(id);
+				setter.accept(id, q);
 			}
 		};
+	}
+
+	/** Show an item in a slot, with its name in the tooltip once known. */
+	private void setSlot(SlotLabel slot, int id, int qty)
+	{
+		slot.setItem(itemManager, id, qty);
+		if (id <= 0)
+		{
+			return;
+		}
+		String known = itemNames.get(id);
+		if (known != null)
+		{
+			slot.setName(id, known);
+			return;
+		}
+		editor.itemName(id, name ->
+		{
+			if (name != null)
+			{
+				if (itemNames.size() > 5000)
+				{
+					itemNames.clear();
+				}
+				itemNames.put(id, name);
+				slot.setName(id, name);
+			}
+		});
 	}
 
 	// -- per-setup rendering ------------------------------------------------- //
@@ -799,13 +883,13 @@ class RuneToolsPanel extends PluginPanel
 			missingLabel.setText(" ");
 			return;
 		}
-		missingLabel.setText("Checking your bank for missing items…");
+		missingLabel.setText(wrappedCenter("Checking your bank…", STATUS_WIDTH));
 		final long forId = s.getId();
 		missingComputer.accept(s, result ->
 		{
 			if (current != null && current.getId() == forId)
 			{
-				missingLabel.setText(result.summary);
+				missingLabel.setText(wrappedCenter(result.summary, STATUS_WIDTH));
 				missingLabel.setToolTipText(missingTooltip(result.items));
 			}
 		});
@@ -846,7 +930,7 @@ class RuneToolsPanel extends PluginPanel
 				? current.getEquipment().get(e.getKey()) : null;
 			if (id != null && id > 0)
 			{
-				e.getValue().setItem(itemManager, id, 1);
+				setSlot(e.getValue(), id, 1);
 				e.getValue().setFuzzy(current.isFuzzy(id));
 			}
 			else
@@ -864,7 +948,7 @@ class RuneToolsPanel extends PluginPanel
 			SlotLabel s = inventoryGrid.slot(i);
 			if (inv != null && i < inv.size())
 			{
-				s.setItem(itemManager, inv.get(i).getItemId(), inv.get(i).getQty());
+				setSlot(s, inv.get(i).getItemId(), inv.get(i).getQty());
 				s.setFuzzy(current.isFuzzy(inv.get(i).getItemId()));
 			}
 			else
@@ -882,7 +966,7 @@ class RuneToolsPanel extends PluginPanel
 			SlotLabel s = runePouchGrid.slot(i);
 			if (r != null && i < r.size())
 			{
-				s.setItem(itemManager, r.get(i).getItemId(), r.get(i).getQty());
+				setSlot(s, r.get(i).getItemId(), r.get(i).getQty());
 				s.setFuzzy(current.isFuzzy(r.get(i).getItemId()));
 			}
 			else
@@ -902,7 +986,7 @@ class RuneToolsPanel extends PluginPanel
 		{
 			final int idx = additionalSlots.size();
 			SlotLabel s = new SlotLabel(SLOT);
-			wireMenu(s, null, null, id -> setAdditional(idx, id), () -> setAdditional(idx, -1));
+			wireMenu(s, null, null, (id, q) -> setAdditional(idx, id, q), () -> setAdditional(idx, -1, 0), true);
 			additionalSlots.add(s);
 			additionalGrid.add(s);
 		}
@@ -915,7 +999,7 @@ class RuneToolsPanel extends PluginPanel
 			SlotLabel s = additionalSlots.get(i);
 			if (add != null && i < count)
 			{
-				s.setItem(itemManager, add.get(i).getItemId(), add.get(i).getQty());
+				setSlot(s, add.get(i).getItemId(), add.get(i).getQty());
 				s.setFuzzy(current.isFuzzy(add.get(i).getItemId()));
 			}
 			else
@@ -982,14 +1066,14 @@ class RuneToolsPanel extends PluginPanel
 			List<GearSetupItem> q = current != null ? current.getQuiver() : null;
 			if (q != null && !q.isEmpty())
 			{
-				quiverSlot.setItem(itemManager, q.get(0).getItemId(), q.get(0).getQty());
+				setSlot(quiverSlot, q.get(0).getItemId(), q.get(0).getQty());
 				quiverSlot.setFuzzy(current.isFuzzy(q.get(0).getItemId()));
 			}
 			else
 			{
 				quiverSlot.clear();
 			}
-			wireMenu(quiverSlot, null, null, id -> setQuiver(id), () -> setQuiver(-1));
+			wireMenu(quiverSlot, null, null, (id, n) -> setQuiver(id, n), () -> setQuiver(-1, 0), true);
 		}
 		else
 		{
@@ -1015,7 +1099,7 @@ class RuneToolsPanel extends PluginPanel
 			current.getEquipment().put(key, id);
 			if (slot != null)
 			{
-				slot.setItem(itemManager, id, 1);
+				setSlot(slot, id, 1);
 				slot.setFuzzy(current.isFuzzy(id));
 			}
 		}
@@ -1034,7 +1118,7 @@ class RuneToolsPanel extends PluginPanel
 		pushUpdate();
 	}
 
-	private void setInv(int i, int id)
+	private void setInv(int i, int id, int qty)
 	{
 		if (current == null)
 		{
@@ -1046,7 +1130,7 @@ class RuneToolsPanel extends PluginPanel
 		{
 			inv.add(EMPTY_ITEM);
 		}
-		inv.set(i, id > 0 ? new GearSetupItem(id, 1) : EMPTY_ITEM);
+		inv.set(i, id > 0 ? new GearSetupItem(id, Math.max(1, qty)) : EMPTY_ITEM);
 		while (!inv.isEmpty() && inv.get(inv.size() - 1).getItemId() <= 0)
 		{
 			inv.remove(inv.size() - 1);   // trim trailing empties so we don't store dead slots
@@ -1055,7 +1139,7 @@ class RuneToolsPanel extends PluginPanel
 		pushUpdate();
 	}
 
-	private void setPouch(int i, int id)
+	private void setPouch(int i, int id, int qty)
 	{
 		if (current == null)
 		{
@@ -1069,7 +1153,7 @@ class RuneToolsPanel extends PluginPanel
 		}
 		if (id > 0)
 		{
-			GearSetupItem it = new GearSetupItem(id, 1);
+			GearSetupItem it = new GearSetupItem(id, Math.max(1, qty));
 			if (i < r.size())
 			{
 				r.set(i, it);
@@ -1092,7 +1176,7 @@ class RuneToolsPanel extends PluginPanel
 		pushUpdate();
 	}
 
-	private void setAdditional(int i, int id)
+	private void setAdditional(int i, int id, int qty)
 	{
 		if (current == null)
 		{
@@ -1106,7 +1190,7 @@ class RuneToolsPanel extends PluginPanel
 		}
 		if (id > 0)
 		{
-			GearSetupItem it = new GearSetupItem(id, 1);
+			GearSetupItem it = new GearSetupItem(id, Math.max(1, qty));
 			if (i < add.size())
 			{
 				add.set(i, it);
@@ -1124,7 +1208,7 @@ class RuneToolsPanel extends PluginPanel
 		pushUpdate();
 	}
 
-	private void setQuiver(int id)
+	private void setQuiver(int id, int qty)
 	{
 		if (current == null)
 		{
@@ -1139,7 +1223,7 @@ class RuneToolsPanel extends PluginPanel
 		q.clear();
 		if (id > 0)
 		{
-			q.add(new GearSetupItem(id, 1));
+			q.add(new GearSetupItem(id, Math.max(1, qty)));
 		}
 		refreshQuiver();
 		pushUpdate();
@@ -1195,16 +1279,17 @@ class RuneToolsPanel extends PluginPanel
 		overviewPanel.removeAll();
 		if (lastSetups.isEmpty())
 		{
-			JLabel empty = new JLabel("<html>No setups yet - press <b>+ Add current setup</b> or build one on runetools.com.</html>");
+			JLabel empty = new JLabel(wrapped("No setups yet.", STATUS_WIDTH));
 			empty.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 			empty.setAlignmentX(Component.LEFT_ALIGNMENT);
 			overviewPanel.add(empty);
 		}
 		else
 		{
-			for (GearSetup s : lastSetups)
+			// Setups in a collection sit under its name, each labelled by its role (SetupGroups).
+			for (SetupGroups.Row r : SetupGroups.rows(lastSetups))
 			{
-				overviewPanel.add(overviewRow(s));
+				overviewPanel.add(r.setup == null ? collectionHeader(r.header) : overviewRow(r));
 				overviewPanel.add(Box.createVerticalStrut(4));
 			}
 		}
@@ -1212,8 +1297,21 @@ class RuneToolsPanel extends PluginPanel
 		overviewPanel.repaint();
 	}
 
-	private JPanel overviewRow(GearSetup s)
+	/** A collection's name above its setups. The name comes from the site: plain text only. */
+	private static JComponent collectionHeader(String name)
 	{
+		JLabel h = noHtml(new JLabel(name));
+		h.setFont(h.getFont().deriveFont(Font.BOLD));
+		h.setForeground(ColorScheme.BRAND_ORANGE);
+		h.setAlignmentX(Component.LEFT_ALIGNMENT);
+		h.setBorder(BorderFactory.createEmptyBorder(6, 2, 0, 0));
+		h.setMaximumSize(new Dimension(Integer.MAX_VALUE, h.getPreferredSize().height + 6));
+		return h;
+	}
+
+	private JPanel overviewRow(SetupGroups.Row r)
+	{
+		GearSetup s = r.setup;
 		boolean active = s.getId() == activeSetupId;
 		JPanel row = new JPanel(new BorderLayout(6, 0));
 		row.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -1224,9 +1322,9 @@ class RuneToolsPanel extends PluginPanel
 			new MatteBorder(0, active ? 3 : 0, 0, 0, ColorScheme.BRAND_ORANGE),
 			BorderFactory.createEmptyBorder(7, active ? 6 : 9, 7, 6)));
 
-		JLabel name = noHtml(new JLabel(s.getName() != null ? s.getName() : "Setup"));
+		JLabel name = noHtml(new JLabel(r.label));
 		name.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-		name.setToolTipText("Open this setup");
+		name.setToolTipText(r.tooltip);   // a role's row names the setup it opens
 		name.addMouseListener(new MouseAdapter()
 		{
 			@Override
@@ -1239,13 +1337,24 @@ class RuneToolsPanel extends PluginPanel
 		JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
 		actions.setOpaque(false);
 		actions.add(iconLabel(active ? FILTER_ON : FILTER_OFF, active ? FILTER_ON_HOVER : FILTER_OFF_HOVER,
-			active ? "Filtering your bank to this setup - click to stop" : "Filter your bank to this setup",
+			active ? "Filtering your bank to this setup. Click to stop." : "Filter your bank to this setup",
 			() -> toggleFilter(s)));
 		actions.add(iconLabel(DELETE_ICON, DELETE_HOVER, "Delete this setup", () -> confirmDelete(s)));
 
 		row.add(name, BorderLayout.CENTER);
 		row.add(actions, BorderLayout.EAST);
-		return row;
+		if (!r.indented)
+		{
+			return row;
+		}
+		// Inside a collection: set in a little under its header.
+		JPanel wrap = new JPanel(new BorderLayout());
+		wrap.setOpaque(false);
+		wrap.setAlignmentX(Component.LEFT_ALIGNMENT);
+		wrap.setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 0));
+		wrap.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
+		wrap.add(row, BorderLayout.CENTER);
+		return wrap;
 	}
 
 	private JLabel iconLabel(ImageIcon icon, ImageIcon hover, String tip, Runnable onClick)
@@ -1308,7 +1417,7 @@ class RuneToolsPanel extends PluginPanel
 	}
 
 	/** A clickable home-menu card that opens a section. */
-	private JPanel menuCard(String title, String subtitle, Runnable onClick)
+	private JPanel menuCard(String title, Runnable onClick)
 	{
 		JPanel card = new JPanel(new BorderLayout(8, 0));
 		card.setOpaque(true);
@@ -1317,27 +1426,16 @@ class RuneToolsPanel extends PluginPanel
 		card.setAlignmentX(Component.LEFT_ALIGNMENT);
 		card.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
 
-		JPanel textCol = new JPanel();
-		textCol.setOpaque(false);
-		textCol.setLayout(new BoxLayout(textCol, BoxLayout.Y_AXIS));
 		JLabel t = new JLabel(title);
 		t.setFont(t.getFont().deriveFont(Font.BOLD, 14f));
 		t.setForeground(ColorScheme.BRAND_ORANGE);
-		t.setAlignmentX(Component.LEFT_ALIGNMENT);
-		JLabel sub = new JLabel(wrapped(subtitle, CARD_TEXT_WIDTH));   // wraps instead of being cut off
-		sub.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		sub.setAlignmentX(Component.LEFT_ALIGNMENT);
-		textCol.add(t);
-		textCol.add(Box.createVerticalStrut(2));
-		textCol.add(sub);
 
 		JLabel chev = new JLabel("›");
 		chev.setFont(chev.getFont().deriveFont(Font.BOLD, 18f));
 		chev.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 
-		card.add(textCol, BorderLayout.CENTER);
+		card.add(t, BorderLayout.CENTER);
 		card.add(chev, BorderLayout.EAST);
-		// As tall as its text (a subtitle may wrap), never stretched by the menu's BoxLayout.
 		card.setMaximumSize(new Dimension(Integer.MAX_VALUE, card.getPreferredSize().height));
 		card.addMouseListener(new MouseAdapter()
 		{
@@ -1362,128 +1460,93 @@ class RuneToolsPanel extends PluginPanel
 		return card;
 	}
 
-	private void showHome()
+	private enum View
 	{
-		current = null;
-		homeHeader.setVisible(true);
-		homeMenu.setVisible(true);
-		backBar.setVisible(false);
-		tradesSection.setVisible(false);
-		bankSection.setVisible(false);
-		caSection.setVisible(false);
-		collectionSection.setVisible(false);
-		setupsTools.setVisible(false);
-		overviewPanel.setVisible(false);
-		detailPanel.setVisible(false);
+		HOME, TRADES, SETUPS, DETAIL, BANK, CA, CLOG
+	}
+
+	private View view = View.HOME;
+	private long viewSetupId = -1;
+
+	/**
+	 * Show one view. A different view (or another setup) starts at the top, so a long view's scroll
+	 * position never carries over; the same one refreshed in place keeps its place.
+	 */
+	private void show(View v, String title)
+	{
+		if (v != View.DETAIL)
+		{
+			current = null;
+		}
+		long setupId = v == View.DETAIL && current != null ? current.getId() : -1;
+		boolean changed = v != view || setupId != viewSetupId;
+		view = v;
+		viewSetupId = setupId;
+		homeHeader.setVisible(v == View.HOME);
+		homeMenu.setVisible(v == View.HOME);
+		backBar.setVisible(v != View.HOME && v != View.DETAIL);
+		if (title != null)
+		{
+			backTitle.setText(title);
+		}
+		tradesSection.setVisible(v == View.TRADES);
+		bankSection.setVisible(v == View.BANK);
+		caSection.setVisible(v == View.CA);
+		collectionSection.setVisible(v == View.CLOG);
+		setupsTools.setVisible(v == View.SETUPS);
+		overviewPanel.setVisible(v == View.SETUPS);
+		detailPanel.setVisible(v == View.DETAIL);
 		revalidate();
 		repaint();
+		if (changed)
+		{
+			scrollToTop();
+		}
+	}
+
+	private void scrollToTop()
+	{
+		JScrollPane sp = getScrollPane();
+		if (sp != null)
+		{
+			SwingUtilities.invokeLater(() -> sp.getVerticalScrollBar().setValue(0));
+		}
+	}
+
+	private void showHome()
+	{
+		show(View.HOME, null);
 	}
 
 	private void showTrades()
 	{
-		current = null;
-		homeHeader.setVisible(false);
-		homeMenu.setVisible(false);
-		backBar.setVisible(true);
-		backTitle.setText("Grand Exchange");
-		tradesSection.setVisible(true);
-		bankSection.setVisible(false);
-		caSection.setVisible(false);
-		collectionSection.setVisible(false);
-		setupsTools.setVisible(false);
-		overviewPanel.setVisible(false);
-		detailPanel.setVisible(false);
-		revalidate();
-		repaint();
+		show(View.TRADES, TITLE_TRADES);
 	}
 
 	private void showBank()
 	{
-		current = null;
-		homeHeader.setVisible(false);
-		homeMenu.setVisible(false);
-		backBar.setVisible(true);
-		backTitle.setText("Bank Organizer");
-		tradesSection.setVisible(false);
-		bankSection.setVisible(true);
-		caSection.setVisible(false);
-		collectionSection.setVisible(false);
-		setupsTools.setVisible(false);
-		overviewPanel.setVisible(false);
-		detailPanel.setVisible(false);
-		revalidate();
-		repaint();
+		show(View.BANK, TITLE_BANK);
 	}
 
 	private void showCa()
 	{
-		current = null;
-		homeHeader.setVisible(false);
-		homeMenu.setVisible(false);
-		backBar.setVisible(true);
-		backTitle.setText("Combat Achievements");
-		tradesSection.setVisible(false);
-		bankSection.setVisible(false);
-		caSection.setVisible(true);
-		collectionSection.setVisible(false);
-		setupsTools.setVisible(false);
-		overviewPanel.setVisible(false);
-		detailPanel.setVisible(false);
-		revalidate();
-		repaint();
+		show(View.CA, TITLE_CA);
 	}
 
 	private void showCollection()
 	{
-		current = null;
-		homeHeader.setVisible(false);
-		homeMenu.setVisible(false);
-		backBar.setVisible(true);
-		backTitle.setText("Collection Log");
-		tradesSection.setVisible(false);
-		bankSection.setVisible(false);
-		caSection.setVisible(false);
-		collectionSection.setVisible(true);
-		setupsTools.setVisible(false);
-		overviewPanel.setVisible(false);
-		detailPanel.setVisible(false);
-		revalidate();
-		repaint();
+		show(View.CLOG, TITLE_CLOG);
 	}
 
 	private void showSetups()
 	{
 		onOpened.run();   // about to use the setups: fetch any edits made on the site (rate-limited)
-		current = null;
-		homeHeader.setVisible(false);
-		homeMenu.setVisible(false);
-		backBar.setVisible(true);
-		backTitle.setText("Gear Setups");
-		tradesSection.setVisible(false);
-		bankSection.setVisible(false);
-		caSection.setVisible(false);
-		collectionSection.setVisible(false);
-		setupsTools.setVisible(true);
-		overviewPanel.setVisible(true);
-		detailPanel.setVisible(false);
-		revalidate();
-		repaint();
+		show(View.SETUPS, TITLE_SETUPS);
 	}
 
 	private void showDetail()
 	{
-		homeHeader.setVisible(false);
-		homeMenu.setVisible(false);
-		backBar.setVisible(false);
-		tradesSection.setVisible(false);
-		bankSection.setVisible(false);
-		caSection.setVisible(false);
-		collectionSection.setVisible(false);
-		setupsTools.setVisible(false);
-		overviewPanel.setVisible(false);
-		detailPanel.setVisible(true);
-		revalidate();
-		repaint();
+		show(View.DETAIL, null);
 	}
 
 	// -- Bank Organizer section ---------------------------------------------- //
@@ -1493,23 +1556,9 @@ class RuneToolsPanel extends PluginPanel
 		bankSection.setLayout(new BoxLayout(bankSection, BoxLayout.Y_AXIS));
 		bankSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-		JLabel cap = new JLabel("Bank Organizer");
-		cap.setFont(cap.getFont().deriveFont(Font.BOLD, 13f));
-		cap.setAlignmentX(Component.LEFT_ALIGNMENT);
-
-		JLabel blurb = new JLabel("<html>Adds an <b>All</b> tab (your whole bank) followed by "
-			+ "<b>Gear</b> (grouped by combat style), <b>Teleports</b>, <b>Supplies</b>, "
-			+ "<b>Skilling</b> and <b>Misc</b> tabs - laid out and value-sorted, placed first in your "
-			+ "tab bar. It only changes how Bank Tags <i>displays</i> your bank; <b>nothing is ever "
-			+ "moved</b>, so it's fully within the rules. Open your bank once so we can read it, then "
-			+ "organize.</html>");
-		blurb.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		blurb.setAlignmentX(Component.LEFT_ALIGNMENT);
-		blurb.setBorder(BorderFactory.createEmptyBorder(6, 0, 8, 0));
-
-		JButton organize = new JButton("Organize my bank");
+		JButton organize = new JButton("Organize bank");
 		organize.setAlignmentX(Component.LEFT_ALIGNMENT);
-		organize.setToolTipText("Build category tabs from the items currently in your bank");
+		organize.setToolTipText("Sort your bank into category tabs (Bank Tags). Nothing in your bank is moved.");
 		organize.addActionListener(e ->
 		{
 			if (onOrganizeBank != null)
@@ -1518,9 +1567,9 @@ class RuneToolsPanel extends PluginPanel
 			}
 		});
 
-		JButton remove = new JButton("Remove organized tabs");
+		JButton remove = new JButton("Remove tabs");
 		remove.setAlignmentX(Component.LEFT_ALIGNMENT);
-		remove.setToolTipText("Delete the tabs RuneTools created (leaves your own tabs alone)");
+		remove.setToolTipText("Delete the tabs Organize bank made. Your own tabs stay.");
 		remove.addActionListener(e ->
 		{
 			if (onRemoveTabs != null)
@@ -1529,36 +1578,21 @@ class RuneToolsPanel extends PluginPanel
 			}
 		});
 
-		JPanel shareSep = new JPanel();
-		shareSep.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
-		shareSep.setPreferredSize(new Dimension(10, 1));
-		shareSep.setBackground(ColorScheme.MEDIUM_GRAY_COLOR);
-		shareSep.setAlignmentX(Component.LEFT_ALIGNMENT);
-
-		JLabel shareBlurb = new JLabel("<html><b>Share a layout.</b> Turn a numbered bank tab into a "
-			+ "Bank Tag, then export it to your runetools.com profile - others can view it and import "
-			+ "it into their own RuneLite.</html>");
-		shareBlurb.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		shareBlurb.setAlignmentX(Component.LEFT_ALIGNMENT);
-		shareBlurb.setBorder(BorderFactory.createEmptyBorder(10, 0, 8, 0));
-
-		JButton convert = new JButton("Save current bank tab as a tag");
+		JButton convert = new JButton("Save tab as tag");
 		convert.setAlignmentX(Component.LEFT_ALIGNMENT);
-		convert.setToolTipText("Turn the numbered bank tab you're viewing into a shareable Bank Tag");
+		convert.setToolTipText("Turn the numbered bank tab you're viewing into a Bank Tags tag.");
 		convert.addActionListener(e ->
 		{
-			String name = JOptionPane.showInputDialog(this,
-				"Open the numbered bank tab you want, then name the tag:", "Bank tab -> tag",
-				JOptionPane.PLAIN_MESSAGE);
+			String name = JOptionPane.showInputDialog(this, "Tag name:", "Save tab as tag", JOptionPane.PLAIN_MESSAGE);
 			if (name != null && !name.trim().isEmpty() && onConvertTab != null)
 			{
 				onConvertTab.accept(name.trim());
 			}
 		});
 
-		JButton export = new JButton("Export current bank tab to site");
+		JButton export = new JButton("Export tab");
 		export.setAlignmentX(Component.LEFT_ALIGNMENT);
-		export.setToolTipText("Publish the bank tag you're viewing to your runetools.com profile");
+		export.setToolTipText("Publish the tag tab you're viewing to your RuneTools profile.");
 		export.addActionListener(e ->
 		{
 			if (onExportTag != null)
@@ -1567,62 +1601,59 @@ class RuneToolsPanel extends PluginPanel
 			}
 		});
 
-		JPanel wholeSep = new JPanel();
-		wholeSep.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
-		wholeSep.setPreferredSize(new Dimension(10, 1));
-		wholeSep.setBackground(ColorScheme.MEDIUM_GRAY_COLOR);
-		wholeSep.setAlignmentX(Component.LEFT_ALIGNMENT);
-
-		JLabel wholeBlurb = new JLabel("<html><b>Whole bank layouts.</b> Share every tab of your bank at "
-			+ "once, placeholders included. Import someone's from runetools.com/layouts and it appears "
-			+ "here as their tabs, plus a <b>Misc</b> tab for anything you own that their layout doesn't "
-			+ "place. Nothing in your bank is moved.</html>");
-		wholeBlurb.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		wholeBlurb.setAlignmentX(Component.LEFT_ALIGNMENT);
-		wholeBlurb.setBorder(BorderFactory.createEmptyBorder(10, 0, 8, 0));
-
-		JButton shareBank = new JButton("Share my whole bank layout");
+		JButton shareBank = new JButton("Share whole bank");
 		shareBank.setAlignmentX(Component.LEFT_ALIGNMENT);
-		shareBank.setToolTipText("Publish all your bank tabs as one layout others can import");
+		shareBank.setToolTipText("Publish every bank tab as one layout others can import.");
 		shareBank.addActionListener(e -> onShareBank.run());
 
-		JButton removeImported = new JButton("Remove imported bank tabs");
+		JButton removeImported = new JButton("Remove imported");
 		removeImported.setAlignmentX(Component.LEFT_ALIGNMENT);
-		removeImported.setToolTipText("Delete the tabs made by the last whole bank layout you imported");
+		removeImported.setToolTipText("Delete the tabs made by the last whole bank layout you imported.");
 		removeImported.addActionListener(e -> onRemoveImportedBank.run());
 
-		bankStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		bankStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
-		bankStatus.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
-
-		bankSection.add(cap);
-		bankSection.add(blurb);
+		bankSection.add(caption("Organizer"));
 		bankSection.add(organize);
 		bankSection.add(Box.createVerticalStrut(6));
 		bankSection.add(remove);
 		bankSection.add(Box.createVerticalStrut(12));
-		bankSection.add(shareSep);
-		bankSection.add(shareBlurb);
+		bankSection.add(separator());
+		bankSection.add(caption("One tab"));
 		bankSection.add(convert);
 		bankSection.add(Box.createVerticalStrut(6));
 		bankSection.add(export);
 		bankSection.add(Box.createVerticalStrut(12));
-		bankSection.add(wholeSep);
-		bankSection.add(wholeBlurb);
+		bankSection.add(separator());
+		bankSection.add(caption("Whole bank"));
 		bankSection.add(shareBank);
 		bankSection.add(Box.createVerticalStrut(6));
 		bankSection.add(removeImported);
-		bankSection.add(bankStatus);
 		return bankSection;
 	}
 
+	/** A one-word sub-heading inside a view. */
+	private static JLabel caption(String text)
+	{
+		JLabel cap = new JLabel(text);
+		cap.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		cap.setAlignmentX(Component.LEFT_ALIGNMENT);
+		cap.setBorder(BorderFactory.createEmptyBorder(8, 0, 6, 0));
+		return cap;
+	}
+
+	private static JPanel separator()
+	{
+		JPanel sep = new JPanel();
+		sep.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
+		sep.setPreferredSize(new Dimension(10, 1));
+		sep.setBackground(ColorScheme.MEDIUM_GRAY_COLOR);
+		sep.setAlignmentX(Component.LEFT_ALIGNMENT);
+		return sep;
+	}
+
+	/** A bank action's result: shown in the message strip like every other action's. */
 	void setBankStatus(String text, boolean ok)
 	{
-		SwingUtilities.invokeLater(() ->
-		{
-			bankStatus.setText(wrapped(text, STATUS_WIDTH));
-			bankStatus.setForeground(ok ? ColorScheme.PROGRESS_COMPLETE_COLOR : ColorScheme.PROGRESS_ERROR_COLOR);
-		});
+		showMessage(text, ok);
 	}
 
 	// -- Combat Achievements section ------------------------------------------ //
@@ -1693,51 +1724,43 @@ class RuneToolsPanel extends PluginPanel
 		collectionSection.setLayout(new BoxLayout(collectionSection, BoxLayout.Y_AXIS));
 		collectionSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-		JLabel cap = new JLabel("Collection Log");
-		cap.setFont(cap.getFont().deriveFont(Font.BOLD, 13f));
-		cap.setAlignmentX(Component.LEFT_ALIGNMENT);
+		gateStyle(clogGate);
 
 		clogOverall.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		clogOverall.setAlignmentX(Component.LEFT_ALIGNMENT);
-		clogOverall.setBorder(BorderFactory.createEmptyBorder(6, 0, 4, 0));
+		clogOverall.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
 
 		clogOverallBar.setStringPainted(true);
 		clogOverallBar.setForeground(ColorScheme.BRAND_ORANGE);
 		clogOverallBar.setAlignmentX(Component.LEFT_ALIGNMENT);
 		clogOverallBar.setMaximumSize(new Dimension(Integer.MAX_VALUE, 20));
+		clogOverallBar.setVisible(false);
 
 		clogTabsPanel.setLayout(new BoxLayout(clogTabsPanel, BoxLayout.Y_AXIS));
 		clogTabsPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
 		clogTabsPanel.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
 
-		clogHint.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+		clogHint.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		clogHint.setAlignmentX(Component.LEFT_ALIGNMENT);
 		clogHint.setBorder(BorderFactory.createEmptyBorder(10, 0, 0, 0));
+		clogHint.setToolTipText("Opening your Collection Log in-game reads the whole log. Pages you open add their names and quantities.");
 
-		// How the whole log gets synced. There is deliberately no "sync now" button here: the read is
-		// only ever started by the player opening their Collection Log in-game.
-		JLabel howTo = new JLabel("<html>Open your Collection Log in-game to sync it: each time you open "
-			+ "it, the whole log is read in one go and sent to the site.</html>");
-		howTo.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		howTo.setAlignmentX(Component.LEFT_ALIGNMENT);
-
-		collectionSection.add(cap);
+		collectionSection.add(clogGate);
 		collectionSection.add(clogOverall);
 		collectionSection.add(clogOverallBar);
-		collectionSection.add(Box.createVerticalStrut(8));
-		collectionSection.add(howTo);
 		collectionSection.add(clogTabsPanel);
 		collectionSection.add(clogHint);
 		return collectionSection;
 	}
 
-	/** Refresh the Collection Log section (overall + per-tab bars, coverage hint). Any thread. */
+	/** Refresh the Collection Log section (overall + per-tab bars, pages read). Any thread. */
 	void setCollectionLog(int obtained, int total, List<ClogTabRow> tabs, int syncedPages)
 	{
 		SwingUtilities.invokeLater(() ->
 		{
-			clogOverall.setText(total > 0 ? "Overall: " + obtained + " / " + total + " collected"
-				: "Open your Collection Log in-game to sync it.");
+			clogOverall.setText(wrapped(total > 0 ? String.format("%,d / %,d collected", obtained, total)
+				: CLOG_WAITING, STATUS_WIDTH));
+			clogOverallBar.setVisible(total > 0);
 			clogOverallBar.setMaximum(Math.max(total, 1));
 			clogOverallBar.setValue(obtained);
 			clogOverallBar.setString(total > 0 ? Math.round(100f * obtained / total) + "%" : "-");
@@ -1764,12 +1787,37 @@ class RuneToolsPanel extends PluginPanel
 					clogTabsPanel.add(Box.createVerticalStrut(3));
 				}
 			}
-			clogHint.setText("<html>Page detail synced for " + syncedPages + " page" + (syncedPages == 1 ? "" : "s")
-				+ " on this account. Pages you open in-game add their names and exact quantities on "
-				+ "the site.</html>");
+			clogHint.setText(wrapped("Pages read: " + syncedPages, STATUS_WIDTH));
 			clogTabsPanel.revalidate();
 			clogTabsPanel.repaint();
 		});
+	}
+
+	/**
+	 * Why the Combat Achievements and Collection Log views can't sync, or null when they can: "Sync
+	 * off", "Connect this character", ... Shown in place of advice that wouldn't work. Any thread.
+	 */
+	void setGates(String caWhy, String clogWhy)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			gate(caGate, caWhy);
+			gate(clogGate, clogWhy);
+		});
+	}
+
+	private static void gate(JLabel label, String why)
+	{
+		label.setVisible(why != null);
+		label.setText(why != null ? wrapped(why, STATUS_WIDTH) : " ");
+	}
+
+	private static void gateStyle(JLabel label)
+	{
+		label.setForeground(ColorScheme.BRAND_ORANGE);
+		label.setAlignmentX(Component.LEFT_ALIGNMENT);
+		label.setBorder(BorderFactory.createEmptyBorder(0, 0, 8, 0));
+		label.setVisible(false);
 	}
 
 	private JPanel buildCaSection()
@@ -1777,13 +1825,11 @@ class RuneToolsPanel extends PluginPanel
 		caSection.setLayout(new BoxLayout(caSection, BoxLayout.Y_AXIS));
 		caSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-		JLabel cap = new JLabel("Combat Achievements");
-		cap.setFont(cap.getFont().deriveFont(Font.BOLD, 13f));
-		cap.setAlignmentX(Component.LEFT_ALIGNMENT);
+		gateStyle(caGate);
 
 		caOverall.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		caOverall.setAlignmentX(Component.LEFT_ALIGNMENT);
-		caOverall.setBorder(BorderFactory.createEmptyBorder(6, 0, 2, 0));
+		caOverall.setBorder(BorderFactory.createEmptyBorder(0, 0, 2, 0));
 
 		caNextTier.setForeground(ColorScheme.BRAND_ORANGE);
 		caNextTier.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -1792,7 +1838,7 @@ class RuneToolsPanel extends PluginPanel
 		caTiersPanel.setLayout(new BoxLayout(caTiersPanel, BoxLayout.Y_AXIS));
 		caTiersPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-		caSection.add(cap);
+		caSection.add(caGate);
 		caSection.add(caOverall);
 		caSection.add(caNextTier);
 		caSection.add(caTiersPanel);
@@ -1804,8 +1850,8 @@ class RuneToolsPanel extends PluginPanel
 	{
 		SwingUtilities.invokeLater(() ->
 		{
-			caOverall.setText(overall);
-			caNextTier.setText(nextTier != null ? nextTier : " ");
+			caOverall.setText(wrapped(overall, STATUS_WIDTH));
+			caNextTier.setText(nextTier != null ? wrapped(nextTier, STATUS_WIDTH) : " ");
 			caTiersPanel.removeAll();
 			for (CaTierRow t : tiers)
 			{
@@ -1843,11 +1889,8 @@ class RuneToolsPanel extends PluginPanel
 		tradesSection.setLayout(new BoxLayout(tradesSection, BoxLayout.Y_AXIS));
 		tradesSection.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-		JLabel cap = new JLabel("Grand Exchange");
-		cap.setFont(cap.getFont().deriveFont(Font.BOLD, 13f));
-		cap.setAlignmentX(Component.LEFT_ALIGNMENT);
-
-		JLabel profitCap = new JLabel("Session profit (est.)");
+		JLabel profitCap = new JLabel("Session profit");
+		profitCap.setToolTipText("Estimate: this session's buys matched to sells, after GE tax.");
 		profitCap.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		profitCap.setAlignmentX(Component.LEFT_ALIGNMENT);
 
@@ -1858,7 +1901,7 @@ class RuneToolsPanel extends PluginPanel
 		offerSummary.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		offerSummary.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-		JLabel recentCap = new JLabel("Recent flips");
+		JLabel recentCap = new JLabel("Recent trades");
 		recentCap.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		recentCap.setBorder(BorderFactory.createEmptyBorder(10, 0, 3, 0));
 		recentCap.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -1866,13 +1909,11 @@ class RuneToolsPanel extends PluginPanel
 		recentTradesPanel.setLayout(new BoxLayout(recentTradesPanel, BoxLayout.Y_AXIS));
 		recentTradesPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-		JButton history = new JButton("View full history ↗");
+		JButton history = new JButton("Full history ↗");
 		history.setAlignmentX(Component.LEFT_ALIGNMENT);
-		history.setToolTipText("Open your Grand Exchange history on runetools.com");
+		history.setToolTipText("Your trade history on runetools.com");
 		history.addActionListener(e -> { if (onOpenHistory != null) { onOpenHistory.run(); } });
 
-		tradesSection.add(cap);
-		tradesSection.add(Box.createVerticalStrut(6));
 		tradesSection.add(profitCap);
 		tradesSection.add(sessionProfit);
 		tradesSection.add(Box.createVerticalStrut(4));
@@ -1913,7 +1954,7 @@ class RuneToolsPanel extends PluginPanel
 		recentTradesPanel.removeAll();
 		if (trades == null || trades.isEmpty())
 		{
-			JLabel none = new JLabel("No flips yet this session.");
+			JLabel none = new JLabel("No trades yet.");
 			none.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 			none.setAlignmentX(Component.LEFT_ALIGNMENT);
 			recentTradesPanel.add(none);
@@ -1954,17 +1995,17 @@ class RuneToolsPanel extends PluginPanel
 		return String.format("%,d", v);
 	}
 
-	/**
-	 * Run when the player opens this side panel, the Gear Setups section or a setup (the plugin uses
-	 * it to fetch fresh setups, at most once every few seconds).
-	 */
-	/** What "Share my whole bank layout" and "Remove imported bank tabs" do. */
+	/** What "Share whole bank" and "Remove imported" do. */
 	void setBankLayoutActions(Runnable share, Runnable removeImported)
 	{
 		this.onShareBank = share;
 		this.onRemoveImportedBank = removeImported;
 	}
 
+	/**
+	 * Run when the player opens this side panel, the setups view or a setup (the plugin uses it to
+	 * fetch fresh setups, at most once every few seconds).
+	 */
 	void setOnOpened(Runnable r)
 	{
 		onOpened = r != null ? r : () -> { };
@@ -1986,6 +2027,7 @@ class RuneToolsPanel extends PluginPanel
 		return statusError;
 	}
 
+	/** Background sync health, on the home view. Any thread. */
 	void setStatus(String text, boolean ok)
 	{
 		statusError = !ok;
@@ -1995,6 +2037,130 @@ class RuneToolsPanel extends PluginPanel
 			status.setText(wrapped("●  " + (text != null ? text : ""), STATUS_WIDTH));
 			status.setForeground(ok ? ColorScheme.PROGRESS_COMPLETE_COLOR : ColorScheme.PROGRESS_ERROR_COLOR);
 			status.setToolTipText(null);
+		});
+	}
+
+	/**
+	 * What something the player did came to (saved, refused, the pairing code, ...). Shown above every
+	 * view until it is dismissed or the next result replaces it; background syncs never clear it.
+	 * Any thread.
+	 */
+	void showMessage(String text, boolean ok)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			if (text == null || text.trim().isEmpty())
+			{
+				messageStrip.setVisible(false);
+			}
+			else
+			{
+				messageLabel.setText(wrapped(text, MESSAGE_WIDTH));
+				messageLabel.setForeground(ok ? ColorScheme.PROGRESS_COMPLETE_COLOR : ColorScheme.PROGRESS_ERROR_COLOR);
+				messageStrip.setVisible(true);
+			}
+			revalidate();
+			repaint();
+		});
+	}
+
+	void clearMessage()
+	{
+		showMessage(null, true);
+	}
+
+	/**
+	 * A notice from the site (its remote config), or the update-required line. {@code onLink} opens its
+	 * link and is null when it has none. Any thread.
+	 */
+	void setNotice(String text, String level, Runnable onLink)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			if (text == null || text.trim().isEmpty())
+			{
+				noticeStrip.setVisible(false);
+			}
+			else
+			{
+				noticeLabel.setText(wrapped(text, MESSAGE_WIDTH));
+				noticeLabel.setForeground("error".equals(level) ? ColorScheme.PROGRESS_ERROR_COLOR
+					: "warn".equals(level) ? ColorScheme.BRAND_ORANGE : ColorScheme.LIGHT_GRAY_COLOR);
+				onNoticeLink = onLink != null ? onLink : () -> { };
+				noticeLink.setVisible(onLink != null);
+				noticeStrip.setVisible(true);
+			}
+			revalidate();
+			repaint();
+		});
+	}
+
+	private JPanel buildMessageStrip()
+	{
+		messageStrip.setAlignmentX(Component.LEFT_ALIGNMENT);
+		messageStrip.setBorder(BorderFactory.createCompoundBorder(
+			new LineBorder(ColorScheme.MEDIUM_GRAY_COLOR, 1), new EmptyBorder(5, 6, 5, 4)));
+		messageStrip.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		JButton close = new JButton("×");
+		close.setMargin(new Insets(0, 4, 0, 4));
+		close.setToolTipText("Dismiss");
+		close.setFocusPainted(false);
+		close.addActionListener(e -> clearMessage());
+		JPanel closeCol = new JPanel(new BorderLayout());
+		closeCol.setOpaque(false);
+		closeCol.add(close, BorderLayout.NORTH);
+		messageStrip.add(messageLabel, BorderLayout.CENTER);
+		messageStrip.add(closeCol, BorderLayout.EAST);
+		messageStrip.setVisible(false);
+		JPanel wrap = new JPanel(new BorderLayout());
+		wrap.setAlignmentX(Component.LEFT_ALIGNMENT);
+		wrap.setBorder(BorderFactory.createEmptyBorder(0, 0, 8, 0));
+		wrap.add(messageStrip, BorderLayout.CENTER);
+		hideWithChild(wrap, messageStrip);
+		return wrap;
+	}
+
+	private JPanel buildNoticeStrip()
+	{
+		noticeStrip.setAlignmentX(Component.LEFT_ALIGNMENT);
+		noticeStrip.setBorder(BorderFactory.createCompoundBorder(
+			new LineBorder(ColorScheme.BRAND_ORANGE, 1), new EmptyBorder(5, 6, 5, 4)));
+		noticeStrip.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		noticeLink.setMargin(new Insets(0, 4, 0, 4));
+		noticeLink.setFocusPainted(false);
+		noticeLink.addActionListener(e -> onNoticeLink.run());
+		noticeLink.setVisible(false);
+		JPanel linkCol = new JPanel(new BorderLayout());
+		linkCol.setOpaque(false);
+		linkCol.add(noticeLink, BorderLayout.NORTH);
+		noticeStrip.add(noticeLabel, BorderLayout.CENTER);
+		noticeStrip.add(linkCol, BorderLayout.EAST);
+		noticeStrip.setVisible(false);
+		JPanel wrap = new JPanel(new BorderLayout());
+		wrap.setAlignmentX(Component.LEFT_ALIGNMENT);
+		wrap.setBorder(BorderFactory.createEmptyBorder(0, 0, 8, 0));
+		wrap.add(noticeStrip, BorderLayout.CENTER);
+		hideWithChild(wrap, noticeStrip);
+		return wrap;
+	}
+
+	/** Keep a wrapper (and its bottom gap) hidden whenever the strip inside it is. */
+	private static void hideWithChild(JPanel wrap, JComponent child)
+	{
+		wrap.setVisible(child.isVisible());
+		child.addComponentListener(new java.awt.event.ComponentAdapter()
+		{
+			@Override
+			public void componentShown(java.awt.event.ComponentEvent e)
+			{
+				wrap.setVisible(true);
+			}
+
+			@Override
+			public void componentHidden(java.awt.event.ComponentEvent e)
+			{
+				wrap.setVisible(false);
+			}
 		});
 	}
 
@@ -2021,24 +2187,39 @@ class RuneToolsPanel extends PluginPanel
 		{
 			return;
 		}
-		Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(text), null);
+		try
+		{
+			Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(text), null);
+		}
+		catch (RuntimeException ex)
+		{
+			showMessage("Couldn't use the clipboard.", false);
+			return;
+		}
 		if (feedbackButton != null)
 		{
 			final String orig = feedbackButton.getText();
-			feedbackButton.setText("✓ Copied!");
+			feedbackButton.setText("Copied");
 			Timer t = new Timer(1600, ev -> feedbackButton.setText(orig));
 			t.setRepeats(false);
 			t.start();
 		}
 	}
 
-	/** Paste one Inventory Setups export string (or a JSON array of them) and import each as a RuneTools setup. */
+	/** Most setups one paste may import (the site keeps 300 per account). */
+	private static final int MAX_IMPORT = 300;
+
+	/**
+	 * Paste one Inventory Setups export string (or a JSON array of them, as a Mass Export file holds)
+	 * and save each as a RuneTools setup. Only reading happens here: the plugin checks the character
+	 * can save, sends them, and reports what was really saved in the message strip.
+	 */
 	private void doImportFromInventorySetups()
 	{
 		JTextArea ta = new JTextArea(8, 28);
 		ta.setLineWrap(true);
 		int ok = JOptionPane.showConfirmDialog(this, new JScrollPane(ta),
-			"Paste a setup exported from the Inventory Setups plugin", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+			"Paste from Inventory Setups' Export", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
 		if (ok != JOptionPane.OK_OPTION)
 		{
 			return;
@@ -2048,19 +2229,34 @@ class RuneToolsPanel extends PluginPanel
 		{
 			return;
 		}
-		int added = 0;
+		List<GearSetup> parsed = parseInventorySetups(raw, MAX_IMPORT);
+		if (parsed.isEmpty())
+		{
+			showMessage("Couldn't read that. Paste the text Inventory Setups' Export copied.", false);
+			return;
+		}
+		onImportSetups.accept(parsed);
+	}
+
+	/** Every setup in an Inventory Setups export string or JSON array of them, up to {@code max}. */
+	static List<GearSetup> parseInventorySetups(String raw, int max)
+	{
+		List<GearSetup> out = new ArrayList<>();
 		try
 		{
-			if (raw.startsWith("["))   // a bulk / "copy all" export is a JSON array of setups
+			if (raw.startsWith("["))
 			{
 				JsonArray arr = new JsonParser().parse(raw).getAsJsonArray();
 				for (JsonElement el : arr)
 				{
+					if (out.size() >= max)
+					{
+						break;
+					}
 					GearSetup g = InventorySetupsBridge.fromExportString(el.toString());
 					if (g != null)
 					{
-						onImportSetup.accept(g);
-						added++;
+						out.add(g);
 					}
 				}
 			}
@@ -2069,52 +2265,53 @@ class RuneToolsPanel extends PluginPanel
 				GearSetup g = InventorySetupsBridge.fromExportString(raw);
 				if (g != null)
 				{
-					onImportSetup.accept(g);
-					added++;
+					out.add(g);
 				}
 			}
 		}
 		catch (RuntimeException ignored)
 		{
-			added = 0;
+			out.clear();
 		}
-		JOptionPane.showMessageDialog(this,
-			added > 0 ? "Imported " + added + " setup" + (added == 1 ? "" : "s") + " to RuneTools."
-				: "Couldn't read that. Paste the full text you copied from Inventory Setups' Export.",
-			"Import from Inventory Setups",
-			added > 0 ? JOptionPane.INFORMATION_MESSAGE : JOptionPane.WARNING_MESSAGE);
+		return out;
 	}
 
-	/** Copy every setup as a JSON array of Inventory Setups import strings for that plugin's bulk import. */
-	private void doCopyAllToInventorySetups()
+	/**
+	 * Save every setup to a file Inventory Setups' Mass Import reads (a JSON array of its export
+	 * objects), through RuneLite's own file chooser.
+	 */
+	private void doExportAllToFile()
 	{
 		if (lastSetups == null || lastSetups.isEmpty())
 		{
-			JOptionPane.showMessageDialog(this, "You have no setups to copy yet.",
-				"Copy for Inventory Setups", JOptionPane.INFORMATION_MESSAGE);
+			showMessage("No setups to export.", false);
 			return;
 		}
-		StringBuilder sb = new StringBuilder("[");
-		int n = 0;
-		for (GearSetup s : lastSetups)
+		String json = InventorySetupsBridge.toMassExport(lastSetups);
+		int n = lastSetups.size();
+		try
 		{
-			String str = InventorySetupsBridge.toImportString(s);
-			if (str == null)
+			List<Filepath> picked = new Filepath.Chooser()
+				.setIsSave()
+				.setAcceptsFiles()
+				.setDialogTitle("Export setups for Inventory Setups")
+				.addExtensionFilter("JSON file", "json")
+				.setDefaultExtension("json")
+				.setFileName("runetools_setups.json")
+				.showDialog(this);
+			if (picked == null || picked.isEmpty())
 			{
-				continue;
+				return;
 			}
-			if (n > 0)
-			{
-				sb.append(',');
-			}
-			sb.append(str);
-			n++;
+			Filepath file = picked.get(0);
+			file.write(json);
+			showMessage("Saved " + n + " setup" + (n == 1 ? "" : "s") + " to " + file.getFileName()
+				+ ". Use Mass Import Setups in Inventory Setups.", true);
 		}
-		sb.append(']');
-		copyToClipboard(sb.toString(), null);
-		JOptionPane.showMessageDialog(this,
-			"Copied " + n + " setup" + (n == 1 ? "" : "s") + " to the clipboard.\nPaste into the Inventory Setups plugin's Import.",
-			"Copy for Inventory Setups", JOptionPane.INFORMATION_MESSAGE);
+		catch (IOException | RuntimeException ex)
+		{
+			showMessage("Couldn't save the file.", false);
+		}
 	}
 
 	void setLinked(String rsnList)
@@ -2139,22 +2336,32 @@ class RuneToolsPanel extends PluginPanel
 	 * unescaped server-supplied string in a label is a remote-image (IP-leak) beacon. Use this for
 	 * every label that ever shows a string that originated on the server.
 	 */
-	// Wrapping widths for HTML labels, inside the panel's 205px of content: the status lines, and a
-	// home-menu card's subtitle beside its chevron.
-	private static final int STATUS_WIDTH = 185;
-	private static final int CARD_TEXT_WIDTH = 140;   // leaves room for the chevron and the panel's scrollbar
+	// Wrapping widths for HTML labels, inside the panel's 205 px of content: the status lines, and the
+	// message and notice strips beside their buttons. In points, not px: Swing's HTML renderer scales a
+	// px width by 1.3, so "185px" came out wider than the panel and every wrapped line was clipped.
+	private static final int STATUS_WIDTH = 180;
+	private static final int MESSAGE_WIDTH = 140;
 
 	/**
-	 * Plain text as a label that wraps at {@code width} px instead of being cut off. The text is
-	 * escaped, so a server-supplied message is shown as text and can never become markup.
+	 * Plain text as a label that wraps at {@code width} instead of being cut off. The text is escaped,
+	 * so a server-supplied message is shown as text and can never become markup.
 	 */
-	private static String wrapped(String text, int width)
+	static String wrapped(String text, int width)
 	{
 		if (text == null || text.trim().isEmpty())
 		{
 			return " ";
 		}
-		return "<html><div style='width:" + width + "px'>" + htmlEscape(text) + "</div></html>";
+		return "<html><div style='width:" + width + "pt'>" + htmlEscape(text) + "</div></html>";
+	}
+
+	private static String wrappedCenter(String text, int width)
+	{
+		if (text == null || text.trim().isEmpty())
+		{
+			return " ";
+		}
+		return "<html><div style='width:" + width + "pt;text-align:center'>" + htmlEscape(text) + "</div></html>";
 	}
 
 	private static JLabel noHtml(JLabel label)

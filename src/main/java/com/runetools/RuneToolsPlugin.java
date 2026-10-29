@@ -9,6 +9,8 @@ import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -22,12 +24,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
-import java.util.function.IntConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.inject.Inject;
@@ -124,25 +128,32 @@ public class RuneToolsPlugin extends Plugin
 	private static final int EQUIP_SETBONUS = InterfaceID.Equipment.NEXT_PAGE;      // native "Set Bonus" button (styling ref)
 	private static final String PENDING_KEY = "pending";
 
-	// Sync-loop pacing. @Schedule's period is fixed, so backoff is applied as a "not before" gate
-	// rather than by rescheduling: the tick still fires every 20s, it just does nothing until the
-	// penalty has elapsed. A rejected key can't be waited out, so that stops the loop outright.
-	// Each tick only uploads what has changed; asking the site for ITS changes (setups, imported
+	// Sync-loop pacing. @Schedule's period is fixed, so pacing is applied as "not before" gates rather
+	// than by rescheduling: the sweep fires every 20s, and each endpoint only goes out once its own
+	// backoff (EndpointBackoff) allows. A rejected key can't be waited out, so that stops the loop.
+	// Each sweep only uploads what has changed; asking the site for ITS changes (setups, imported
 	// layouts) follows the slower, separate PollSchedule.
-	private static final long SYNC_PERIOD_MS = 20_000L;                  // must match the @Schedule below
-	private static final long SYNC_BACKOFF_MAX_MS = 10L * 60L * 1000L;   // ten minutes between sweeps, at worst
 	private static final int SYNC_AUTH_FAILURES_MAX = 3;                 // consecutive rejected sweeps before we stop
 	private static final long RETRY_AFTER_MAX_MS = 60L * 60L * 1000L;    // a 429's Retry-After is honoured up to an hour
-	private static final String SYNC_REVOKED_MSG = "Key rejected - click \"Connect to RuneTools\" to reconnect.";
+	private static final long CONFIG_MIN_GAP_MS = 60_000L;               // a forced config fetch, at most once a minute
+	private static final String SYNC_REVOKED_MSG = "Key rejected. Press Connect to RuneTools to reconnect.";
 	private static final String SYNC_NAME_TAKEN_MSG = "This character's name is linked to another RuneTools account.";
+	private static final String MSG_LOG_IN = "Log in to the game first.";
+	private static final String MSG_NOT_HERE = "RuneTools doesn't sync on this world.";
+	private static final String MSG_UPDATE = "Restart RuneLite to update RuneTools.";
+	private static final String MSG_PAUSED = "Paused by RuneTools for now. Try again later.";
+	private static final String CONFIG_CACHE_KEY = "remoteConfig";
+	private static final String NOTICE_SEEN_KEY = "remoteNoticeSeen";
 
-	// Background endpoints, as SyncParking knows them. Trades are parked per RSN group ("trades:<rsn>").
+	// Background endpoints, as SyncParking and EndpointBackoff know them. Trades go per character
+	// ("trades:<account hash>").
 	private static final String EP_TRADES = "trades:";
 	private static final String EP_STATE = "state";
 	private static final String EP_COMBAT_ACHIEVEMENTS = "combat-achievements";
 	private static final String EP_COLLECTION_LOG = "collection-log";
 	private static final String EP_BANK_LAYOUTS = "bank-layouts";
 	private static final String EP_ACHIEVEMENTS = "achievements";
+	private static final String EP_SETUPS = "setups";
 
 	// Adventurer's Log. Achievements wait here until sent, a batch at a time.
 	private static final int MAX_ACHIEVEMENTS_QUEUED = 200;
@@ -195,37 +206,48 @@ public class RuneToolsPlugin extends Plugin
 	@Inject private ItemManager itemManager;
 	@Inject private SpriteManager spriteManager;
 	@Inject private ChatboxItemSearch itemSearch;
+	@Inject private ScheduledExecutorService executor;
 
 	private RuneToolsApiClient api;
-	private OfferTracker offerTracker;
-	private SessionTracker sessionTracker;
 	private SetupManager setupManager;
+	private DebouncedConfig debounced;
 	private BankFilterController bankFilter;
 	private BankOrganizer bankOrganizer;
 	private LoadoutReader loadoutReader;
 	private RuneToolsPanel panel;
 	private NavigationButton navButton;
 
-	// The published account state. The client thread swaps in a new immutable snapshot; the sync
-	// thread reads one coherent object, so it never sees a torn multi-field mix. stateDirty flags
+	// Everything captured from the character in game, dropped together when it stops belonging to
+	// whoever is playing (see CharacterState). The client thread swaps in a new immutable snapshot; the
+	// sync thread reads one coherent object, so it never sees a torn multi-field mix. stateDirty flags
 	// that there's something new to upload (kept separate so it can be cleared/re-set independently).
-	private final AtomicReference<AccountSnapshot> snapshot = new AtomicReference<>(AccountSnapshot.empty());
+	private final CharacterState chars = new CharacterState();
+	private final AtomicReference<AccountSnapshot> snapshot = chars.snapshot;
 	private final AtomicBoolean stateDirty = new AtomicBoolean();
 	private final List<Trade> pending = Collections.synchronizedList(new ArrayList<>());
 
-	// Health of the upload loop, shared by every background request rather than tracked per endpoint,
-	// so one unreachable/rate-limiting server slows the WHOLE loop down. The scheduler thread reads
-	// these and OkHttp callback threads write them, hence the atomics.
+	// While the plugin is switched on. Every async callback and timer checks it, so nothing a request
+	// sent earlier brings back acts once the plugin is off.
+	private volatile boolean running;
+	// Health of the upload loop. The scheduler thread reads these and OkHttp callback threads write
+	// them, hence the atomics.
 	private volatile boolean loggedIn;         // a character is actually in game (nothing to sync otherwise)
-	private volatile long nextSyncAtMillis;    // backoff gate: don't start another sweep before this
+	private volatile boolean mainGame;         // ...and on a main-game world (not Leagues, Deadman, beta, ...)
 	private volatile boolean authRevoked;      // key rejected too often; stop until the user reconnects
-	private final AtomicInteger syncFailures = new AtomicInteger();
 	private final AtomicInteger authFailures = new AtomicInteger();
 	private final AtomicLong syncSweep = new AtomicLong();          // one increment per sync() pass
-	private final AtomicLong penalizedSweep = new AtomicLong(-1);   // last sweep already charged a failure
-	// A 429's Retry-After, as a "not before" time. Separate from nextSyncAtMillis because any 2xx
-	// resets that one, and the server's rate limit is per IP, so another endpoint answering fine (or a
-	// character switch) doesn't mean the wait is over.
+	private final AtomicLong authChargedSweep = new AtomicLong(-1); // last sweep already charged a rejected key
+	private volatile long lastSweepAt;
+	// Per-endpoint backoff: one failing endpoint waits on its own (see EndpointBackoff).
+	private final EndpointBackoff backoff = new EndpointBackoff();
+	private final Set<String> tradesInFlight = ConcurrentHashMap.newKeySet();   // one upload per character at a time
+	// The site's settings for the plugin (see RemoteConfig): the last good copy, or the defaults.
+	private volatile RemoteConfig remoteConfig = RemoteConfig.defaults();
+	private final AtomicBoolean configInFlight = new AtomicBoolean();
+	private volatile long lastConfigFetchAt;
+	private volatile String lastConfigTag = "";
+	// A 429's Retry-After, as a "not before" time for every endpoint: the server's rate limit is per IP,
+	// so another endpoint answering fine (or a character switch) doesn't mean the wait is over.
 	private final AtomicLong retryAfterUntilMillis = new AtomicLong();
 	// Refusals that retrying can't fix (a name linked to another account, a payload the server can
 	// never accept), held per endpoint so they aren't re-posted every sweep. See SyncParking.
@@ -233,8 +255,6 @@ public class RuneToolsPlugin extends Plugin
 	// When to next ask the site for setups and imported bank layouts. See PollSchedule.
 	private final PollSchedule remotePoll = new PollSchedule();
 
-	private int inventoryCoins;
-	private int bankCoins;
 	private int activeOffers;
 	private volatile String layoutsEtag;
 	// Whether this login's character has been taken in (panel refreshed, first state upload queued).
@@ -294,19 +314,22 @@ public class RuneToolsPlugin extends Plugin
 	private Map<String, Integer> levelBaseline;                        // skill name -> real level
 	private Map<String, Integer> levelBaselineXp;                      // skill name -> its XP then
 	private int loggedInTick = -1;
+	private boolean offWorldShown;   // client thread: the panel already says this world isn't synced
 
 	private Widget dpsButton;   // our injected "RuneTools DPS" widget in the equipment interface (client thread only)
+	private final List<Widget> dpsWidgets = new ArrayList<>();   // every widget it is made of (client thread only)
 
 	/** Lets the setups panel open the in-game item search and read live equipment/inventory slots. */
 	private final SlotEditor slotEditor = new SlotEditor()
 	{
 		@Override
-		public void searchItem(String tooltip, IntConsumer onPicked)
+		public void searchItem(String tooltip, ItemPick onPicked)
 		{
 			clientThread.invoke(() ->
 			{
 				if (client.getGameState() != GameState.LOGGED_IN)
 				{
+					panel.showMessage(MSG_LOG_IN, false);
 					return;
 				}
 				itemSearch
@@ -314,77 +337,100 @@ public class RuneToolsPlugin extends Plugin
 					.onItemSelected(itemId -> clientThread.invoke(() ->
 					{
 						int canon = itemManager.canonicalize(itemId);
-						SwingUtilities.invokeLater(() -> onPicked.accept(canon));
+						SwingUtilities.invokeLater(() -> onPicked.accept(canon, 1));
 					}))
 					.build();
 			});
 		}
 
 		@Override
-		public void readEquipSlot(int equipIdx, IntConsumer onItem)
+		public void readEquipSlot(int equipIdx, ItemPick onItem)
 		{
-			clientThread.invoke(() ->
-			{
-				int id = itemAt(client.getItemContainer(InventoryID.WORN), equipIdx);
-				SwingUtilities.invokeLater(() -> onItem.accept(id));
-			});
+			readSlot(InventoryID.WORN, equipIdx, onItem);
 		}
 
 		@Override
-		public void readInvSlot(int index, IntConsumer onItem)
+		public void readInvSlot(int index, ItemPick onItem)
+		{
+			readSlot(InventoryID.INV, index, onItem);
+		}
+
+		private void readSlot(int container, int index, ItemPick onItem)
 		{
 			clientThread.invoke(() ->
 			{
-				int id = itemAt(client.getItemContainer(InventoryID.INV), index);
-				SwingUtilities.invokeLater(() -> onItem.accept(id));
+				if (client.getGameState() != GameState.LOGGED_IN)
+				{
+					panel.showMessage(MSG_LOG_IN, false);
+					return;
+				}
+				Item it = itemAt(client.getItemContainer(container), index);
+				final int id = it != null ? itemManager.canonicalize(it.getId()) : -1;
+				final int qty = it != null ? Math.max(1, it.getQuantity()) : 0;
+				SwingUtilities.invokeLater(() -> onItem.accept(id, qty));
 			});
 		}
 
 		@Override
 		public void isQuiver(int itemId, Consumer<Boolean> onResult)
 		{
+			final boolean q = itemId > 0 && LoadoutReader.QUIVERS.contains(itemId);
+			SwingUtilities.invokeLater(() -> onResult.accept(q));
+		}
+
+		@Override
+		public void itemName(int itemId, Consumer<String> onName)
+		{
 			clientThread.invoke(() ->
 			{
-				boolean q = false;
-				if (itemId > 0)
+				String name;
+				try
 				{
-					String name = itemManager.getItemComposition(itemId).getName();
-					q = name != null && name.toLowerCase().contains("quiver");
+					name = itemManager.getItemComposition(itemId).getName();
 				}
-				final boolean qf = q;
-				SwingUtilities.invokeLater(() -> onResult.accept(qf));
+				catch (RuntimeException ex)
+				{
+					name = null;
+				}
+				final String n = name;
+				SwingUtilities.invokeLater(() -> onName.accept(n));
 			});
 		}
 	};
 
-	private int itemAt(ItemContainer c, int idx)
+	/** The item in a container slot, or null for an empty slot. Client thread. */
+	private static Item itemAt(ItemContainer c, int idx)
 	{
 		if (c == null)
 		{
-			return -1;
+			return null;
 		}
 		Item[] items = c.getItems();
-		if (idx < 0 || idx >= items.length)
+		if (idx < 0 || idx >= items.length || items[idx].getId() <= 0)
 		{
-			return -1;
+			return null;
 		}
-		int id = items[idx].getId();
-		return id > 0 ? itemManager.canonicalize(id) : -1;
+		return items[idx];
 	}
 
 	@Override
 	protected void startUp()
 	{
-		api = new RuneToolsApiClient(okHttpClient, config);
+		running = true;
+		resetSession();
+		migrateServerUrl();
+		debounced = new DebouncedConfig(this::writeConfig,
+			k -> configManager.getConfiguration(RuneToolsConfig.GROUP, k), executor, 2_000L);
+		remoteConfig = cachedRemoteConfig();
+		api = new RuneToolsApiClient(okHttpClient, config, () -> remoteConfig);
 		api.setKeySupplier(this::activeApiKey);   // per-character keys: authenticate as the logged-in character
-		offerTracker = new OfferTracker();
-		sessionTracker = new SessionTracker();
-		setupManager = new SetupManager(configManager, api);
 		bankFilter = new BankFilterController(bankTagsService, tagManager, layoutManager, itemManager, clientThread);
 		bankOrganizer = new BankOrganizer(bankTagsService, tagManager, layoutManager, tabManager, itemManager,
 			clientThread, configManager);
-		setupManager.setOnDelete(id -> bankFilter.forget(id));
-		setupManager.setOnRemoteChange(remotePoll::onChanged);
+		setupManager = new SetupManager(debounced, api, setupHost, executor);
+		// The setups cache used to be one blob for every character; it is kept per account hash now.
+		configManager.unsetConfiguration(RuneToolsConfig.GROUP, "setups");
+		configManager.unsetConfiguration(RuneToolsConfig.GROUP, "setupsEtag");
 		loadoutReader = new LoadoutReader(client, itemManager);
 		adventureLog = new AdventureLog(new AdventureLog.Settings()
 		{
@@ -421,14 +467,13 @@ public class RuneToolsPlugin extends Plugin
 		panel = new RuneToolsPanel(this::onFilterSetup, this::onClearFilter, itemManager,
 			this::addCurrentSetup, this::updateFromGear, this::pushSetup, this::deleteSetup, slotEditor, this::openHistory,
 			this::organizeBank, this::removeOrganizedTabs, this::convertBankTab, this::exportBankTag, this::openSiteLogin,
-			this::checkDps, this::importInventorySetup);
-		setupManager.setOnChange(() -> panel.setSetups(setupManager.getSetups()));
-		setupManager.setOnError(msg -> panel.setStatus(msg, false));
+			this::checkDps, this::importInventorySetups);
 		// Opening the side panel is the clearest sign the player wants current setups: poll now
 		// instead of waiting out the backoff.
-		panel.setOnOpened(() -> requestRemotePoll(PollSchedule.PANEL_GAP_MS));
+		panel.setOnOpened(() -> requestRemotePoll(remoteConfig.limitMs("panel_gap_s")));
 		panel.setMissingComputer(this::computeMissingItems);
 		panel.setBankLayoutActions(this::exportWholeBank, this::removeImportedBank);
+		applyRemoteConfig(remoteConfig, false);
 		loadSpellbookIcons();
 		navButton = NavigationButton.builder()
 			.tooltip("RuneTools")
@@ -438,29 +483,50 @@ public class RuneToolsPlugin extends Plugin
 			.build();
 		clientToolbar.addNavigation(navButton);
 		updatePanelStatic();
-		panel.setSetups(setupManager.getSetups());   // show any cached setups immediately
 		updateTradesPanel();
 	}
 
 	@Override
 	protected void shutDown()
 	{
+		running = false;
+		// Nothing still in flight may act from here on: cancel it all, and drop what answers anyway.
+		api.close();
+		setupManager.close();
+		loggedIn = false;
+		mainGame = false;
+		liveInFlight.set(false);
+		achievementsInFlight.set(false);
+		configInFlight.set(false);
+		tradesInFlight.clear();
 		// Close our Bank Tags setup filter if it is the one open, so the bank isn't left filtered to a
 		// gear setup after the plugin is disabled. Another plugin's open tag is left alone.
 		bankFilter.clear();
-		// Drop the reference to our injected equipment DPS button. Its widgets are dynamic children of
-		// the equipment interface, which the game discards when that interface closes or redraws its
-		// stats page; no native widget is moved or changed, so there is nothing to restore. We avoid
-		// deleteAllChildren() here so we never wipe the Wiki plugin's own button off the shared parent.
-		dpsButton = null;
+		removeDpsButton();
 		pairing.set(null);   // a pending pairing dies with the plugin; Connect starts a fresh one
 		clientToolbar.removeNavigation(navButton);
 		savePending();
-		// Drop any captured Collection Log. While the plugin is disabled the event bus is
-		// unregistered, so no logout is ever seen - without this, disabling, switching character and
-		// re-enabling would upload the previous character's pages under the new one's key.
+		debounced.flush();
+		// While the plugin is disabled the event bus is unregistered, so no logout is ever seen:
+		// without this, disabling, switching character and re-enabling would carry the previous
+		// character's captured state (and Collection Log pages) over to the next one.
+		resetSession();
+		navButton = null;
+		// Keep the panel reference: a late callback may still touch it (the api client drops them).
+	}
+
+	/** Forget everything captured from the game this session (plugin start and stop). */
+	private void resetSession()
+	{
+		chars.reset();
+		stateDirty.set(false);
+		identityAnnounced = false;
+		loggedInTick = -1;
 		discardCollectionCapture();
-		adventureLog.reset();
+		if (adventureLog != null)
+		{
+			adventureLog.reset();
+		}
 		levelBaseline = null;
 		levelBaselineXp = null;
 		synchronized (achievements)
@@ -471,8 +537,65 @@ public class RuneToolsPlugin extends Plugin
 		{
 			clogUnlocks.clear();
 		}
-		navButton = null;
-		// Keep the panel reference: a late async upload callback may still touch it.
+		forgetCharacterSync();
+		parking.clear();
+		backoff.clear();
+		authFailures.set(0);
+		authRevoked = false;
+		lastSweepAt = 0;
+		lastConfigFetchAt = 0;
+		lastConfigTag = "";
+	}
+
+	/** Drop what the site sync knows about the character in game (a switch, a logout, a stop). */
+	private void forgetCharacterSync()
+	{
+		caCatalogSent = false;
+		caCompletedHash = 0;
+		lastCaSnapshot = null;
+		caThresholds = null;
+		layoutsEtag = null;
+		bankImportWaiting = false;
+		liveSetupsTag = "";
+		liveLayoutsTag = "";
+		liveRetryAt = 0;
+		liveNextAt = 0;
+		liveFailures.set(0);
+		if (api != null)
+		{
+			api.cancelLive();
+		}
+	}
+
+	/**
+	 * Old installs saved https://gecharts.com (the site's first address) as the Server URL, and some
+	 * typed www.runetools.com or left the https:// off. Save the address those mean.
+	 */
+	private void migrateServerUrl()
+	{
+		String saved = configManager.getConfiguration(RuneToolsConfig.GROUP, "serverUrl");
+		if (saved == null || saved.trim().isEmpty())
+		{
+			return;
+		}
+		String norm = RuneToolsApiClient.normalizeServerUrl(saved);
+		if (norm != null && !norm.equals(saved))
+		{
+			configManager.setConfiguration(RuneToolsConfig.GROUP, "serverUrl", norm);
+		}
+	}
+
+	/** How DebouncedConfig writes: null unsets the key. */
+	private void writeConfig(String key, String value)
+	{
+		if (value == null)
+		{
+			configManager.unsetConfiguration(RuneToolsConfig.GROUP, key);
+		}
+		else
+		{
+			configManager.setConfiguration(RuneToolsConfig.GROUP, key, value);
+		}
 	}
 
 	@Provides
@@ -491,6 +614,7 @@ public class RuneToolsPlugin extends Plugin
 		if (e.getGameState() == GameState.LOGGED_IN)
 		{
 			loggedIn = true;
+			mainGame = isMainGame();
 			if (loggedInTick < 0)
 			{
 				loggedInTick = client.getTickCount();   // levels are only trusted a few ticks after this
@@ -503,7 +627,7 @@ public class RuneToolsPlugin extends Plugin
 		// LOGGING_IN and CONNECTION_LOST are on this list too: a character switch can go straight
 		// from one login to the next without passing through LOGIN_SCREEN, and captured state must
 		// never survive into a different character's session (the reference plugins reset on the
-		// same set).
+		// same set). The account-hash check in captureAllowed() catches a switch that skips them.
 		if (e.getGameState() == GameState.LOGIN_SCREEN || e.getGameState() == GameState.HOPPING
 			|| e.getGameState() == GameState.LOGGING_IN || e.getGameState() == GameState.CONNECTION_LOST)
 		{
@@ -528,6 +652,72 @@ public class RuneToolsPlugin extends Plugin
 			levelBaselineXp = null;
 			loggedInTick = -1;
 		}
+		if (e.getGameState() == GameState.LOGIN_SCREEN)
+		{
+			// Logged out: the session's capture (bank, inventory, skills, account hash, coins) goes. A
+			// hop keeps it, since it is the same character on another world.
+			mainGame = false;
+			chars.logout();
+			stateDirty.set(false);
+			forgetCharacterSync();
+			backoff.clear();
+			setupManager.switchAccount(null);
+			updatePanelStatic();
+			updateTradesPanel();
+		}
+	}
+
+	/**
+	 * Whether the world is the main game. Leagues, Deadman, beta, tournament, quest-speedrun, Fresh
+	 * Start, PvP Arena and Last Man Standing worlds hold progress that isn't the character's own, so
+	 * nothing from them is captured, queued or sent. Client thread.
+	 */
+	private boolean isMainGame()
+	{
+		EnumSet<WorldType> types = client.getWorldType();
+		return types != null && Collections.disjoint(types, NOT_MAIN_GAME);
+	}
+
+	/** The account hash in game, or null before it is known. */
+	private String currentHash()
+	{
+		long ah = client.getAccountHash();
+		return ah == -1 ? null : Long.toString(ah);
+	}
+
+	/**
+	 * Gate for every capture handler (client thread): only on a main-game world, and only once the
+	 * captured state is known to belong to the character in game. A capture that finds a different
+	 * account hash first drops what the previous character left behind.
+	 */
+	private boolean captureAllowed()
+	{
+		if (!running || !isMainGame())
+		{
+			return false;
+		}
+		if (chars.adopt(currentHash()))
+		{
+			onCharacterChanged();
+		}
+		return true;
+	}
+
+	/** Another character's captured state was just dropped (CharacterState.adopt). Client thread. */
+	private void onCharacterChanged()
+	{
+		identityAnnounced = false;
+		stateDirty.set(false);
+		discardCollectionCapture();
+		adventureLog.reset();
+		levelBaseline = null;
+		levelBaselineXp = null;
+		forgetCharacterSync();
+		resumeSync();
+		backoff.clear();
+		remotePoll.reset();
+		updateTradesPanel();
+		log.debug("RuneTools: a different character is in game; the previous one's captured state was dropped");
 	}
 
 	@Subscribe
@@ -536,7 +726,7 @@ public class RuneToolsPlugin extends Plugin
 		if (e.getGroupId() == InterfaceID.BANKMAIN)
 		{
 			// Opening the bank is when setups and imported layouts get used, so fetch any new ones.
-			requestRemotePoll(PollSchedule.BANK_GAP_MS);
+			requestRemotePoll(remoteConfig.limitMs("bank_gap_s"));
 		}
 		else if (e.getGroupId() == InterfaceID.COLLECTION)
 		{
@@ -634,6 +824,10 @@ public class RuneToolsPlugin extends Plugin
 	@Subscribe
 	public void onStatChanged(StatChanged e)
 	{
+		if (!captureAllowed())
+		{
+			return;
+		}
 		trackLevel(e.getSkill());
 		if (!config.syncState())
 		{
@@ -687,7 +881,8 @@ public class RuneToolsPlugin extends Plugin
 		if (caResyncPending)
 		{
 			caResyncPending = false;
-			if (config.syncCombatAchievements() && syncAllowed())
+			if (config.syncCombatAchievements() && syncAllowed()
+				&& backoff.allowed(EP_COMBAT_ACHIEVEMENTS, System.currentTimeMillis()))
 			{
 				syncCombatAchievements();
 			}
@@ -748,7 +943,7 @@ public class RuneToolsPlugin extends Plugin
 			}
 			else
 			{
-				panel.setStatus("Collection Log read (" + obtained.size() + " items) - syncing…", true);
+				panel.setStatus("Collection Log read: " + obtained.size() + " items.", true);
 			}
 		}
 	}
@@ -795,13 +990,13 @@ public class RuneToolsPlugin extends Plugin
 		{
 			String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
 			// e.g. "Congratulations, you've completed a Hard combat task: ..."
-			if (msg.contains("combat task") && msg.contains("complet"))
+			if (msg.contains("combat task") && msg.contains("complet") && isMainGame())
 			{
 				caResyncPending = true;
 			}
 			// "New item added to your collection log: ..." - the drop bumps the overall counters now;
 			// the item's page detail syncs the next time you open that page.
-			if (msg.contains("added to your collection log") && config.syncCollectionLog())
+			if (msg.contains("added to your collection log") && collectionLogSyncOn() && isMainGame())
 			{
 				refreshCollectionTotals();
 				queueClogUnlock(e.getMessage());
@@ -860,7 +1055,7 @@ public class RuneToolsPlugin extends Plugin
 	 */
 	private void collectTransmittedClogItem(ScriptPreFired e)
 	{
-		if (!collectionLogSyncOn() || CollectionLog.isOtherPlayers(client))
+		if (!collectionLogSyncOn() || !captureAllowed() || CollectionLog.isOtherPlayers(client))
 		{
 			return;
 		}
@@ -885,7 +1080,7 @@ public class RuneToolsPlugin extends Plugin
 	 */
 	private boolean collectionLogSyncOn()
 	{
-		return config.syncCollectionLog() && hasKeyAndConsent();
+		return running && config.syncCollectionLog() && hasKeyAndConsent();
 	}
 
 	/**
@@ -901,7 +1096,7 @@ public class RuneToolsPlugin extends Plugin
 	{
 		if (e.getScriptId() == CollectionLog.SETUP_SCRIPT)
 		{
-			if (!collectionLogSyncOn())
+			if (!collectionLogSyncOn() || !captureAllowed())
 			{
 				return;
 			}
@@ -912,7 +1107,7 @@ public class RuneToolsPlugin extends Plugin
 			}
 			// Once per opening (requestFullLog itself re-fires SETUP, and the flag only resets when
 			// the interface is opened or closed again).
-			if (!clogAskedThisOpen)
+			if (!clogAskedThisOpen && remoteConfig.on("clog_request"))
 			{
 				clogAskedThisOpen = true;
 				clogRequested = true;
@@ -922,7 +1117,7 @@ public class RuneToolsPlugin extends Plugin
 			}
 			return;
 		}
-		if (e.getScriptId() != ScriptID.COLLECTION_DRAW_LIST || !collectionLogSyncOn())
+		if (e.getScriptId() != ScriptID.COLLECTION_DRAW_LIST || !collectionLogSyncOn() || !captureAllowed())
 		{
 			return;
 		}
@@ -973,6 +1168,10 @@ public class RuneToolsPlugin extends Plugin
 	{
 		clientThread.invoke(() ->
 		{
+			if (!captureAllowed() || client.getGameState() != GameState.LOGGED_IN)
+			{
+				return;
+			}
 			JsonObject totals = CollectionLog.readTotals(client);
 			if (totals == null)
 			{
@@ -996,7 +1195,7 @@ public class RuneToolsPlugin extends Plugin
 	public void onItemContainerChanged(ItemContainerChanged e)
 	{
 		ItemContainer c = e.getItemContainer();
-		if (c == null)
+		if (c == null || !captureAllowed())
 		{
 			return;
 		}
@@ -1013,9 +1212,9 @@ public class RuneToolsPlugin extends Plugin
 		}
 		if (e.getContainerId() == InventoryID.INV)
 		{
-			inventoryCoins = c.count(ItemID.COINS);
+			chars.inventoryCoins = c.count(ItemID.COINS);
 			final JsonArray inv = itemsToArray(c);
-			final long gp = (long) inventoryCoins + (long) bankCoins;
+			final long gp = (long) chars.inventoryCoins + (long) chars.bankCoins;
 			AccountSnapshot before = snapshot.get();
 			if (inv.equals(before.inventory) && gp == before.gp)
 			{
@@ -1032,9 +1231,9 @@ public class RuneToolsPlugin extends Plugin
 				layoutsEtag = null;   // the waiting import has to come back in full, not as a 304
 				pollImportedLayouts();
 			}
-			bankCoins = c.count(ItemID.COINS);
+			chars.bankCoins = c.count(ItemID.COINS);
 			final JsonArray bank = config.syncBank() ? itemsToArray(c) : null;
-			final long gp = (long) inventoryCoins + (long) bankCoins;
+			final long gp = (long) chars.inventoryCoins + (long) chars.bankCoins;
 			AccountSnapshot before = snapshot.get();
 			if (gp == before.gp && (bank == null || bank.equals(before.bank)))
 			{
@@ -1056,6 +1255,10 @@ public class RuneToolsPlugin extends Plugin
 		{
 			return;
 		}
+		if (!captureAllowed())
+		{
+			return;   // another world's offers (Leagues, Deadman, ...) are never tracked or sent
+		}
 
 		AccountSnapshot snap = snapshot.get();
 		String rsn = snap.rsn;
@@ -1076,20 +1279,20 @@ public class RuneToolsPlugin extends Plugin
 			}
 		}
 
-		// Queue the trade whenever we captured one - do NOT require an RSN here. The API key
-		// already identifies the account server-side; the RSN only links a display name and is
-		// backfilled at flush time if it wasn't known yet. (Dropping on a momentarily-null RSN was
+		// Queue the trade whenever we captured one - do NOT require an RSN here. The account hash says
+		// whose fill it is (TradeGroups sends it with that character's own key); a missing RSN is filled
+		// in at flush time, only from that same character. (Dropping on a momentarily-null RSN was
 		// silently losing fills.)
-		Trade t = offerTracker.process(e.getSlot(), offer, rsn, accountHash);
+		Trade t = chars.offers().process(e.getSlot(), offer, rsn, accountHash);
 		if (t != null)
 		{
-			sessionTracker.record(t);
+			chars.session().record(t);
 		}
 		log.debug("RuneTools/GE: slot={} state={} qtySold={} spent={} syncTrades={} -> {}",
 			e.getSlot(), offer.getState(), offer.getQuantitySold(), offer.getSpent(),
 			config.syncTrades(),
 			t == null ? "no-trade" : (t.getSide() + " " + t.getQty() + " @" + t.getPrice()));
-		if (t != null && config.syncTrades())
+		if (t != null && config.syncTrades() && config.consent())
 		{
 			queuePending(t);
 			savePending();
@@ -1118,25 +1321,46 @@ public class RuneToolsPlugin extends Plugin
 		// Ticks only fire in game, so this also opens the sync gate when the plugin is ENABLED
 		// mid-session, where no GameStateChanged ever arrives to open it.
 		loggedIn = true;
+		mainGame = isMainGame();
+		if (loggedInTick < 0)
+		{
+			loggedInTick = client.getTickCount();   // enabled mid-session: level-ups count from now
+		}
+		if (!mainGame)
+		{
+			if (!offWorldShown)
+			{
+				offWorldShown = true;
+				updatePanelStatic();   // "RuneTools doesn't sync on this world."
+			}
+			return;   // nothing is captured on Leagues, Deadman and the like (see isMainGame)
+		}
+		offWorldShown = false;
+		final String hash = currentHash();
+		if (chars.adopt(hash))
+		{
+			onCharacterChanged();
+		}
 		Player p = client.getLocalPlayer();
 		String name = p != null ? p.getName() : null;
-		if (name == null || name.isEmpty())
+		if (name == null || name.isEmpty() || hash == null)
 		{
 			return;
 		}
 		boolean firstIdentity = !identityAnnounced;
 		identityAnnounced = true;
-		long ah = client.getAccountHash();
-		final String hash = ah == -1 ? null : Long.toString(ah);
 		final boolean members = client.getWorldType().contains(WorldType.MEMBERS);
 		snapshot.updateAndGet(s -> s.toBuilder().rsn(name).accountHash(hash).members(members).build());
 		if (firstIdentity)
 		{
+			setupManager.switchAccount(hash);   // this character's cached setups, never another's
 			// Ensure at least one state upload after login even if nothing else changes.
 			recomputeGpAndOffers();
 			stateDirty.set(true);
 			updatePanelStatic();
+			updateTradesPanel();
 			remindToConnect(name, hash);
+			fetchRemoteConfig(true);
 			// RSN only at DEBUG; never log the persistent account hash (a stable cross-session
 			// correlator) to the on-disk client log users routinely share.
 			log.debug("RuneTools: identity captured for {}", name);
@@ -1156,8 +1380,8 @@ public class RuneToolsPlugin extends Plugin
 		}
 		String msg = new ChatMessageBuilder()
 			.append(ChatColorType.HIGHLIGHT).append("RuneTools: ")
-			.append(ChatColorType.NORMAL).append(rsn + " isn't connected yet. Open the RuneTools side panel and press "
-				+ "Connect to RuneTools; after that it connects by itself every time you log in.")
+			.append(ChatColorType.NORMAL).append(Text.escapeJagex(rsn) + " isn't connected. Open the RuneTools panel "
+				+ "and press Connect to RuneTools.")
 			.build();
 		chatMessageManager.queue(QueuedMessage.builder().type(ChatMessageType.CONSOLE).runeLiteFormattedMessage(msg).build());
 	}
@@ -1168,19 +1392,19 @@ public class RuneToolsPlugin extends Plugin
 		final JsonArray invArr = inv != null ? itemsToArray(inv) : null;
 		if (inv != null)
 		{
-			inventoryCoins = inv.count(ItemID.COINS);
+			chars.inventoryCoins = inv.count(ItemID.COINS);
 		}
 		ItemContainer bank = client.getItemContainer(InventoryID.BANK);
 		JsonArray bankArr = null;
 		if (bank != null)
 		{
-			bankCoins = bank.count(ItemID.COINS);
+			chars.bankCoins = bank.count(ItemID.COINS);
 			bankArr = config.syncBank() ? itemsToArray(bank) : null;
 		}
 		final JsonArray bankJson = bankArr;
 		ItemContainer worn = client.getItemContainer(InventoryID.WORN);
 		final JsonArray wornArr = worn != null ? itemsToArray(worn) : null;
-		final long gp = (long) inventoryCoins + (long) bankCoins;
+		final long gp = (long) chars.inventoryCoins + (long) chars.bankCoins;
 		snapshot.updateAndGet(s -> s.toBuilder()
 			.inventory(invArr != null ? invArr : s.inventory)
 			.bank(bankJson != null ? bankJson : s.bank)
@@ -1260,19 +1484,12 @@ public class RuneToolsPlugin extends Plugin
 		{
 			return false;
 		}
-		if (!hasKeyAndConsent() || !snapshot.get().hasIdentity() || client.getGameState() != GameState.LOGGED_IN)
+		if (!running || !hasKeyAndConsent() || !snapshot.get().hasIdentity()
+			|| client.getGameState() != GameState.LOGGED_IN)
 		{
 			return false;
 		}
-		EnumSet<WorldType> types = client.getWorldType();
-		for (WorldType t : NOT_MAIN_GAME)
-		{
-			if (types != null && types.contains(t))
-			{
-				return false;
-			}
-		}
-		return true;
+		return isMainGame();
 	}
 
 	/** Hand the game's own messages to the detector. Messages other plugins print are ignored. */
@@ -1418,12 +1635,12 @@ public class RuneToolsPlugin extends Plugin
 
 	/**
 	 * Send the oldest queued achievements, one request at a time. Any thread (the tick and the 20s
-	 * sweep both call it). Gated like the rest of the background loop; a refusal the server will
-	 * never accept is dropped, anything else stays queued for the next try.
+	 * sweep both call it). Gated like the rest of the background loop, and by this endpoint's own
+	 * backoff; a refusal the server will never accept is dropped, anything else stays queued.
 	 */
 	private void flushAchievements()
 	{
-		if (!syncAllowed() || System.currentTimeMillis() < nextSyncAtMillis)
+		if (!syncAllowed() || !backoff.allowed(EP_ACHIEVEMENTS, System.currentTimeMillis()) || !uploadsOn("achievements"))
 		{
 			return;
 		}
@@ -1462,7 +1679,7 @@ public class RuneToolsPlugin extends Plugin
 			public void onFailure(Call call, IOException ex)
 			{
 				achievementsInFlight.set(false);
-				noteSyncFailure();
+				noteFailure(EP_ACHIEVEMENTS, payload);
 				log.debug("RuneTools: achievements sync failed (will retry): {}", ex.getMessage());
 			}
 
@@ -1471,8 +1688,9 @@ public class RuneToolsPlugin extends Plugin
 			{
 				try (Response r = resp)
 				{
-					SyncResponse.Outcome outcome = noteSyncResult(r, EP_ACHIEVEMENTS, identity, payload);
-					if (r.isSuccessful() || outcome == SyncResponse.Outcome.PAYLOAD_REJECTED)
+					SyncResponse.Outcome outcome = noteSyncResult(r, EP_ACHIEVEMENTS, identity, payload,
+						SyncResponse.Shape.OK_TRUE, 0, false);
+					if (outcome == SyncResponse.Outcome.OK || outcome == SyncResponse.Outcome.PAYLOAD_REJECTED)
 					{
 						dropAchievements(batch);
 					}
@@ -1502,26 +1720,29 @@ public class RuneToolsPlugin extends Plugin
 	@Schedule(period = 20, unit = ChronoUnit.SECONDS, asynchronous = true)
 	public void sync()
 	{
+		if (!running)
+		{
+			return;
+		}
+		if (loggedIn && config.consent())
+		{
+			fetchRemoteConfig(false);   // the site's settings, every half hour (needs no key)
+		}
 		if (!syncAllowed())
 		{
-			return;   // login screen, no key for this character, no consent, or the key was rejected
+			return;   // login screen, another world, no key for this character, no consent, or the key was rejected
 		}
-		if (System.currentTimeMillis() < nextSyncAtMillis)
+		long now = System.currentTimeMillis();
+		if (now - lastSweepAt < remoteConfig.limitMs("sync_s") - 1_000L)
 		{
-			return;   // still backing off from a failed sweep (server down, rate-limited, ...)
+			return;   // the site asked for a slower pace than every 20 seconds
 		}
-		syncSweep.incrementAndGet();   // every response below reports into THIS sweep's health
-		flushTrades();                       // needs only the API key (it identifies the account)
-		if (snapshot.get().hasIdentity())
-		{
-			flushState();                    // account state is per-(user, RSN), so it needs the RSN
-		}
-		else
-		{
-			log.debug("RuneTools: state sync waiting for in-game identity (RSN not captured yet)");
-		}
-		pollRemoteIfDue();                   // setups + imported layouts, on their own slower schedule
-		ensureLiveUpdates();                 // and the request the site answers the moment one is saved
+		lastSweepAt = now;
+		syncSweep.incrementAndGet();   // a rejected key is counted once per sweep
+		flushTrades();
+		flushState();
+		pollRemoteIfDue();             // setups + imported layouts, on their own slower schedule
+		ensureLiveUpdates();           // and the request the site answers the moment one is saved
 		if (config.syncCombatAchievements())
 		{
 			syncCombatAchievements();
@@ -1534,35 +1755,37 @@ public class RuneToolsPlugin extends Plugin
 		flushAchievements();   // anything a failed send left queued (normally sent from the tick)
 	}
 
-	/**
-	 * Ask the site for setup and bank-layout changes, if {@link #remotePoll} says one is due. Both
-	 * requests are ETag polls (a 304 when nothing changed) and are only queued here, so this returns
-	 * at once and is safe from any thread. Gated like the rest of the background loop: nothing goes
-	 * out unless a connected, consenting character is logged in and the server isn't backing us off.
-	 */
 	// Live updates: one request held open on the site, answered the moment a setup or bank layout is
 	// saved there (see RuneToolsApiClient.waitForChanges). Started from the sync loop, re-armed after
-	// every answer, and stopped by the same gate as every other sync (logged out, no consent, no key).
+	// every answer (never sooner than live_gap_s after the last one started, so a proxy that answers
+	// at once can't make the client loop), and stopped by the same gate as every other sync.
 	private final AtomicBoolean liveInFlight = new AtomicBoolean();
 	private final AtomicInteger liveFailures = new AtomicInteger();
 	private volatile String liveSetupsTag = "";
 	private volatile String liveLayoutsTag = "";
 	private volatile long liveRetryAt;
+	private volatile long liveNextAt;
 
 	private void ensureLiveUpdates()
 	{
-		if (!config.syncSetups() || !syncAllowed() || System.currentTimeMillis() < liveRetryAt
-			|| !liveInFlight.compareAndSet(false, true))
+		long now = System.currentTimeMillis();
+		if (!running || !config.syncSetups() || !remoteConfig.on("live") || !syncAllowed()
+			|| now < liveRetryAt || now < liveNextAt || !liveInFlight.compareAndSet(false, true))
 		{
 			return;
 		}
-		api.waitForChanges(liveSetupsTag, liveLayoutsTag, new Callback()
+		liveNextAt = now + remoteConfig.limitMs("live_gap_s");
+		final String identity = syncIdentity();
+		api.waitForChanges(liveSetupsTag, liveLayoutsTag, lastConfigTag, new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException ex)
 			{
-				liveBackoff();
 				liveInFlight.set(false);
+				if (running && (call == null || !call.isCanceled()))
+				{
+					liveBackoff(0);   // a cancel is a character switch or logout, not a failure
+				}
 				log.debug("RuneTools: live updates paused: {}", ex.getMessage());
 			}
 
@@ -1572,28 +1795,56 @@ public class RuneToolsPlugin extends Plugin
 				boolean again = false;
 				try (Response r = resp)
 				{
+					if (!running || !identity.equals(syncIdentity()))
+					{
+						return;   // asked for another character: its answer means nothing now
+					}
 					if (r.code() == 204)
 					{
 						again = true;   // nothing saved meanwhile: ask again
 					}
 					else if (r.isSuccessful())
 					{
-						JsonObject o = new JsonParser().parse(RuneToolsApiClient.readBoundedBody(r)).getAsJsonObject();
-						liveSetupsTag = str(o, "setups_tag", liveSetupsTag);
-						liveLayoutsTag = str(o, "layouts_tag", liveLayoutsTag);
-						if (o.has("setups") && o.get("setups").getAsBoolean())
+						String b = RuneToolsApiClient.readBoundedBody(r);
+						if (!SyncResponse.confirms(SyncResponse.Shape.OBJECT, b, 0))
 						{
-							setupManager.poll();
+							liveBackoff(0);
 						}
-						if (o.has("layouts") && o.get("layouts").getAsBoolean())
+						else
 						{
-							pollImportedLayouts();
+							JsonObject o = new JsonParser().parse(b).getAsJsonObject();
+							liveSetupsTag = str(o, "setups_tag", liveSetupsTag);
+							liveLayoutsTag = str(o, "layouts_tag", liveLayoutsTag);
+							String configTag = str(o, "config_tag", null);
+							if (configTag != null && !configTag.equals(lastConfigTag))
+							{
+								lastConfigTag = RemoteConfig.clean(configTag, 64);
+								fetchRemoteConfig(true);
+							}
+							if (isTrue(o, "setups"))
+							{
+								setupManager.poll();
+							}
+							if (isTrue(o, "layouts"))
+							{
+								pollImportedLayouts();
+							}
+							again = true;
 						}
-						again = true;
+					}
+					else if (r.code() == 429)
+					{
+						long wait = SyncResponse.retryAfterMillis(r.header("Retry-After"), System.currentTimeMillis(),
+							RETRY_AFTER_MAX_MS);
+						if (wait > 0)
+						{
+							retryAfterUntilMillis.accumulateAndGet(System.currentTimeMillis() + wait, Math::max);
+						}
+						liveBackoff(wait);
 					}
 					else
 					{
-						liveBackoff();   // a rejected key or a rate limit: the sync loop reports those
+						liveBackoff(0);   // a rejected key or an outage: the sync loop reports those
 					}
 					if (again)
 					{
@@ -1602,7 +1853,7 @@ public class RuneToolsPlugin extends Plugin
 				}
 				catch (Exception ex)
 				{
-					liveBackoff();
+					liveBackoff(0);
 				}
 				finally
 				{
@@ -1610,22 +1861,47 @@ public class RuneToolsPlugin extends Plugin
 				}
 				if (again)
 				{
-					ensureLiveUpdates();
+					rearmLive();
 				}
 			}
 		});
 	}
 
-	/** After a failed wait: try again in 15 s, then 30, 60... up to 5 minutes. */
-	private void liveBackoff()
+	/** Ask again as soon as live_gap_s allows. */
+	private void rearmLive()
 	{
-		int n = liveFailures.incrementAndGet();
-		liveRetryAt = System.currentTimeMillis() + Math.min(300_000L, 15_000L << Math.min(n - 1, 5));
+		if (!running)
+		{
+			return;
+		}
+		long delay = Math.max(0L, liveNextAt - System.currentTimeMillis());
+		if (delay == 0)
+		{
+			ensureLiveUpdates();
+		}
+		else
+		{
+			executor.schedule(this::ensureLiveUpdates, delay, TimeUnit.MILLISECONDS);
+		}
 	}
 
+	/** After a failed wait: try again in 15 s, then 30, 60... up to 5 minutes, or what a 429 asked. */
+	private void liveBackoff(long atLeastMs)
+	{
+		int n = liveFailures.incrementAndGet();
+		long wait = Math.min(300_000L, 15_000L << Math.min(n - 1, 5));
+		liveRetryAt = System.currentTimeMillis() + Math.max(wait, atLeastMs);
+	}
+
+	/**
+	 * Ask the site for setup and bank-layout changes, if {@link #remotePoll} says one is due. Both
+	 * requests are ETag polls (a 304 when nothing changed) and are only queued here, so this returns
+	 * at once and is safe from any thread. Gated like the rest of the background loop, and each by its
+	 * own endpoint's backoff.
+	 */
 	private void pollRemoteIfDue()
 	{
-		if (!config.syncSetups() || !syncAllowed() || System.currentTimeMillis() < nextSyncAtMillis)
+		if (!running || !config.syncSetups() || !syncAllowed())
 		{
 			return;
 		}
@@ -1648,72 +1924,96 @@ public class RuneToolsPlugin extends Plugin
 	}
 
 	/**
-	 * Gate for the BACKGROUND loop: there has to be something to sync (a character in game, a key for
-	 * that character, consent), the key must not already have been rejected, and the server must not
-	 * have asked us to wait (a 429's Retry-After). Without the in-game check a client parked on the
-	 * login screen posted every 20s forever - ~21,600 requests a day that can only ever be no-ops.
-	 * User-initiated actions keep using {@link #hasKeyAndConsent()}: an explicit click should always be
-	 * attempted, however the background loop is feeling.
+	 * Gate for the BACKGROUND loop: there has to be something to sync (a character in game on a
+	 * main-game world, its name and account hash known, a key for that character, consent), the key
+	 * must not already have been rejected, and the server must not have asked us to wait (a 429's
+	 * Retry-After). Without the in-game check a client parked on the login screen posted every 20s
+	 * forever. User-initiated actions use {@link #hasKeyAndConsent()} plus their own checks.
 	 */
 	private boolean syncAllowed()
 	{
-		return loggedIn && !authRevoked && System.currentTimeMillis() >= retryAfterUntilMillis.get()
-			&& hasKeyAndConsent();
+		return running && loggedIn && mainGame && !authRevoked && snapshot.get().hasIdentity()
+			&& System.currentTimeMillis() >= retryAfterUntilMillis.get() && hasKeyAndConsent();
 	}
 
 	/**
-	 * Back to the normal period: no penalty, no rejected-key halt. A 429's Retry-After is left alone:
-	 * the rate limit is per IP, so it outlasts a character switch or a new key.
+	 * Clear the rejected-key halt. A 429's Retry-After is left alone (the rate limit is per IP, so it
+	 * outlasts a character switch or a new key), and so is each endpoint's backoff.
 	 */
 	private void resumeSync()
 	{
-		syncFailures.set(0);
 		authFailures.set(0);
 		authRevoked = false;
-		nextSyncAtMillis = 0;
 	}
 
-	/** A transport-level failure (no response at all) is charged the same as a 5xx. */
-	private void noteSyncFailure()
+	/** Whether an upload may go out: the site hasn't switched it off and this build isn't too old. */
+	private boolean uploadsOn(String feature)
 	{
-		chargeSyncFailure(0, false);
+		return remoteConfig.on(feature) && !writesPaused();
+	}
+
+	/** The site said this build is older than it accepts writes from (min_version). */
+	private boolean writesPaused()
+	{
+		return remoteConfig.tooOld(PluginVersion.VERSION);
+	}
+
+	/** A request that got no answer at all: that endpoint backs off. */
+	private void noteFailure(String endpoint, long payload)
+	{
+		backoff.failed(endpoint, payload, false, System.currentTimeMillis(),
+			remoteConfig.limitMs("sync_s"), remoteConfig.limitMs("backoff_max_s"));
 	}
 
 	/**
-	 * Every background response funnels through here so the whole loop shares ONE health signal:
-	 * a failure slows every endpoint down instead of each carrying on hammering independently, and any
-	 * 2xx puts it straight back to the normal period. See {@link SyncResponse} for how each status is
-	 * read.
+	 * Every background response funnels through here. See {@link SyncResponse} for how each status is
+	 * read; a 2xx counts only in {@code shape} ({@code sent} is what a trades answer must confirm).
 	 *
-	 * <p>{@code endpoint}, {@code identity} and {@code payload} say what was sent, so a refusal that
-	 * retrying can't fix is parked rather than re-posted every sweep: a name linked to another
-	 * RuneTools account (409, or 403 {@code rsn_taken}) holds the endpoint until the character or key
-	 * changes, and a 400/413 holds that exact payload until it changes. Neither is an outage or a bad
-	 * key, so neither slows the loop down or counts toward the rejected-key halt.
-	 *
-	 * <p>Returns the outcome so the caller can decide whether to keep the payload queued.
+	 * <ul>
+	 *   <li>OK clears this endpoint's backoff and any refusal parked for it.</li>
+	 *   <li>A name or limit refusal (409, 403 {@code rsn_taken}) holds the endpoint for this identity
+	 *       until the character or key changes, with the server's words for the panel; a 400/413
+	 *       holds that exact payload. Neither is an outage, so neither backs off.</li>
+	 *   <li>Everything else backs this endpoint off on its own. The same payload failing with a 5xx
+	 *       {@link EndpointBackoff#GIVE_UP_AFTER} times is given up on (parked, returned as
+	 *       PAYLOAD_REJECTED so the caller treats it like a refused body).</li>
+	 *   <li>A rejected key counts toward stopping the loop, but only for the character in game:
+	 *       {@code foreignKey} marks another character's key (a queued trade of an alt), whose
+	 *       rejection only holds that upload.</li>
+	 * </ul>
 	 */
-	private SyncResponse.Outcome noteSyncResult(Response r, String endpoint, String identity, long payload)
+	private SyncResponse.Outcome noteSyncResult(Response r, String endpoint, String identity, long payload,
+		SyncResponse.Shape shape, int sent, boolean foreignKey)
 	{
 		int code = r.code();
-		String errorCode = SyncResponse.needsErrorCode(code) ? errorCodeOf(r) : null;
-		SyncResponse.Outcome outcome = SyncResponse.classify(code, errorCode);
+		String body = code == 304 ? "" : RuneToolsApiClient.bodyOrEmpty(r);
+		SyncResponse.Outcome outcome = SyncResponse.classify(code, body, shape, sent);
+		return noteOutcome(outcome, code, body, r.header("Retry-After"), endpoint, identity, payload, foreignKey);
+	}
+
+	private SyncResponse.Outcome noteOutcome(SyncResponse.Outcome outcome, int code, String body, String retryAfter,
+		String endpoint, String identity, long payload, boolean foreignKey)
+	{
+		long now = System.currentTimeMillis();
+		long base = remoteConfig.limitMs("sync_s");
+		long max = remoteConfig.limitMs("backoff_max_s");
 		switch (outcome)
 		{
 			case OK:
+				backoff.succeeded(endpoint);
 				parking.release(endpoint, identity);
-				boolean wasRevoked = authRevoked;
-				resumeSync();
-				panel.setLastSync(nowString());
-				// A sync that worked means any red message (a key that stopped working, the site
-				// unreachable a moment ago, an earlier sign-in answer) no longer holds: put the
-				// panel back to "Connected as ..." instead of leaving it red while syncs succeed.
-				if (wasRevoked || panel.isStatusError())
+				if (!foreignKey)
 				{
-					updatePanelStatic();
+					boolean wasRevoked = authRevoked;
+					resumeSync();
+					panel.setLastSync(nowString());
+					// A sync that worked means any red status (a key that stopped working, the site
+					// unreachable a moment ago) no longer holds: put it back to "Connected as ...".
+					if (wasRevoked || panel.isStatusError())
+					{
+						updatePanelStatic();
+					}
 				}
-				break;
-			case IGNORED:
 				break;
 			case NAME_TAKEN:
 				parking.parkName(endpoint, identity);
@@ -1721,81 +2021,70 @@ public class RuneToolsPlugin extends Plugin
 				log.debug("RuneTools: {} refused (HTTP {}) - this character's name is linked to another RuneTools"
 					+ " account; holding it until the character or key changes", endpoint, code);
 				break;
+			case REFUSED:
+				parking.parkName(endpoint, identity, SyncResponse.errorText(body));
+				updatePanelStatic();
+				log.debug("RuneTools: {} refused (HTTP {}) - holding it until the character or key changes", endpoint, code);
+				break;
 			case PAYLOAD_REJECTED:
 				parking.parkPayload(endpoint, identity, payload);
 				log.debug("RuneTools: {} rejected the payload (HTTP {}) - holding it until it changes", endpoint, code);
 				break;
 			case RATE_LIMITED:
-				long now = System.currentTimeMillis();
-				long wait = SyncResponse.retryAfterMillis(r.header("Retry-After"), now, RETRY_AFTER_MAX_MS);
+				long wait = SyncResponse.retryAfterMillis(retryAfter, now, RETRY_AFTER_MAX_MS);
 				if (wait > 0)
 				{
-					// Set before the once-per-sweep charge below, so it holds even when another response
-					// already charged this sweep.
 					retryAfterUntilMillis.accumulateAndGet(now + wait, Math::max);
 					log.debug("RuneTools: rate limited - server asked for {}s", wait / 1000L);
 				}
-				chargeSyncFailure(code, false);
+				backoff.failed(endpoint, payload, false, now, Math.max(base, wait), max);
 				break;
 			case KEY_REJECTED:
-				chargeSyncFailure(code, true);
+				backoff.failed(endpoint, payload, false, now, base, max);
+				if (foreignKey)
+				{
+					parking.parkName(endpoint, identity);   // that character's key: held until it is reconnected
+				}
+				else
+				{
+					chargeKeyRejected();
+				}
 				break;
 			default:
-				chargeSyncFailure(code, false);
+				if (!foreignKey)
+				{
+					authFailures.set(0);   // "consecutive" rejections: any other answer breaks the streak
+				}
+				if (backoff.failed(endpoint, payload, SyncResponse.serverError(code), now, base, max))
+				{
+					parking.parkPayload(endpoint, identity, payload);
+					log.debug("RuneTools: {} failed {} times with the same payload - giving up on it", endpoint,
+						EndpointBackoff.GIVE_UP_AFTER);
+					return SyncResponse.Outcome.PAYLOAD_REJECTED;
+				}
+				log.debug("RuneTools: {} failed (HTTP {}) - backing off", endpoint, code);
 				break;
 		}
 		return outcome;
 	}
 
-	/** The {@code code} of a JSON error body, read without buffering more than a small error page. */
-	private static String errorCodeOf(Response r)
+	/** One rejected-key answer, counted once per sweep (a sweep sends several requests). */
+	private void chargeKeyRejected()
 	{
-		try
-		{
-			return r.body() != null ? SyncResponse.errorCode(r.peekBody(16 * 1024).string()) : null;
-		}
-		catch (IOException | RuntimeException ex)
-		{
-			return null;
-		}
-	}
-
-	/**
-	 * Charge one failed response to the loop's backoff ({@code code} is 0 for a transport failure).
-	 * {@code keyRejected} marks a 401 (or a 403 that isn't a name conflict), which also counts toward
-	 * stopping the loop outright.
-	 */
-	private void chargeSyncFailure(int code, boolean keyRejected)
-	{
-		// One sweep fires a dozen requests, so charge only the FIRST bad response of each. Otherwise a
-		// single outage would count a dozen failures at once and vault straight to the ceiling (and
-		// trip the rejected-key halt) before we had retried even once.
 		long sweep = syncSweep.get();
-		if (penalizedSweep.getAndSet(sweep) == sweep)
+		if (authChargedSweep.getAndSet(sweep) == sweep)
 		{
 			return;
 		}
-		if (keyRejected)
+		if (authFailures.incrementAndGet() >= SYNC_AUTH_FAILURES_MAX && !authRevoked)
 		{
-			if (authFailures.incrementAndGet() >= SYNC_AUTH_FAILURES_MAX)
-			{
-				// A revoked key never heals on its own: stop, and put the fix in the panel instead of
-				// posting a dead key at the server until the client is closed.
-				authRevoked = true;
-				updatePanelStatic();
-				log.warn("RuneTools: sync stopped after {} rejected sweeps - reconnect this character",
-					SYNC_AUTH_FAILURES_MAX);
-				return;
-			}
+			// A revoked key never heals on its own: stop, and put the fix in the panel instead of
+			// posting a dead key at the server until the client is closed.
+			authRevoked = true;
+			updatePanelStatic();
+			log.warn("RuneTools: sync stopped after {} rejected sweeps - reconnect this character",
+				SYNC_AUTH_FAILURES_MAX);
 		}
-		else
-		{
-			authFailures.set(0);   // "consecutive" rejections - any other failure breaks the streak
-		}
-		int fails = syncFailures.incrementAndGet();
-		long wait = Math.min(SYNC_BACKOFF_MAX_MS, SYNC_PERIOD_MS << Math.min(fails, 5));
-		nextSyncAtMillis = System.currentTimeMillis() + wait;
-		log.debug("RuneTools: sync failure #{} (HTTP {}) - next sweep in {}s", fails, code, wait / 1000L);
 	}
 
 	/**
@@ -1803,17 +2092,17 @@ public class RuneToolsPlugin extends Plugin
 	 * authenticates with. Parks are scoped to this, so another character, a rename or a newly-issued
 	 * key always gets a fresh try. Only the key's hash is kept.
 	 */
-	private String syncIdentity(String rsn, String accountHash)
+	private static String syncIdentity(String rsn, String accountHash, String key)
 	{
 		return (rsn != null ? rsn : "") + '|' + (accountHash != null ? accountHash : "") + '|'
-			+ Integer.toHexString(api.activeKey().hashCode());
+			+ Integer.toHexString((key != null ? key : "").hashCode());
 	}
 
-	/** {@link #syncIdentity(String, String)} for the character logged in right now. */
+	/** {@link #syncIdentity(String, String, String)} for the character logged in right now. */
 	private String syncIdentity()
 	{
 		AccountSnapshot s = snapshot.get();
-		return syncIdentity(s.rsn, s.accountHash);
+		return syncIdentity(s.rsn, s.accountHash, api.activeKey());
 	}
 
 	/** Assemble the panel's Combat Achievements view from the last cache read. */
@@ -1855,6 +2144,10 @@ public class RuneToolsPlugin extends Plugin
 	/** POST any collection-log totals/pages changed since the last successful sync. Scheduler thread. */
 	private void syncCollectionLog()
 	{
+		if (!backoff.allowed(EP_COLLECTION_LOG, System.currentTimeMillis()) || !uploadsOn("clog"))
+		{
+			return;   // kept queued
+		}
 		JsonObject totals;
 		JsonArray obtained;
 		// Key -> page, kept together in ONE map: these two used to be a values() list and a separate
@@ -1950,7 +2243,7 @@ public class RuneToolsPlugin extends Plugin
 			{
 				requeueCollectionPages(generation, sentPages, sentHashes, sentObtained);
 				requeueUnlocks(identity, sentUnlocks);
-				noteSyncFailure();
+				noteFailure(EP_COLLECTION_LOG, payload);
 				log.debug("RuneTools: collection-log sync failed (will retry): {}", ex.getMessage());
 			}
 
@@ -1959,8 +2252,9 @@ public class RuneToolsPlugin extends Plugin
 			{
 				try (Response r = resp)
 				{
-					noteSyncResult(r, EP_COLLECTION_LOG, identity, payload);
-					if (r.isSuccessful())
+					SyncResponse.Outcome outcome = noteSyncResult(r, EP_COLLECTION_LOG, identity, payload,
+						SyncResponse.Shape.OK_TRUE, 0, false);
+					if (outcome == SyncResponse.Outcome.OK)
 					{
 						synchronized (clogLock)
 						{
@@ -1970,7 +2264,7 @@ public class RuneToolsPlugin extends Plugin
 					else
 					{
 						requeueCollectionPages(generation, sentPages, sentHashes, sentObtained);
-						if (r.code() != 400 && r.code() != 413)
+						if (outcome != SyncResponse.Outcome.PAYLOAD_REJECTED)
 						{
 							requeueUnlocks(identity, sentUnlocks);   // a refused body won't improve by resending
 						}
@@ -2086,7 +2380,7 @@ public class RuneToolsPlugin extends Plugin
 	{
 		clientThread.invoke(() ->
 		{
-			if (client.getGameState() != GameState.LOGGED_IN)
+			if (!running || client.getGameState() != GameState.LOGGED_IN || !captureAllowed())
 			{
 				return;
 			}
@@ -2098,6 +2392,11 @@ public class RuneToolsPlugin extends Plugin
 			lastCaSnapshot = snap;
 			caThresholds = CombatAchievements.readTierThresholds(client);
 			pushCaPanel();
+			if (!syncAllowed() || !backoff.allowed(EP_COMBAT_ACHIEVEMENTS, System.currentTimeMillis())
+				|| !uploadsOn("ca"))
+			{
+				return;   // shown in the panel; sent once the endpoint may go again
+			}
 			boolean sendCatalog = !caCatalogSent;
 			if (!sendCatalog && snap.completedHash == caCompletedHash)
 			{
@@ -2118,6 +2417,10 @@ public class RuneToolsPlugin extends Plugin
 				body.add("tasks", snap.tasks);
 			}
 			body.add("completed", snap.completed);
+			if (snap.unknown.size() > 0)
+			{
+				body.add("unknown", snap.unknown);   // completion this build can't read (see CombatAchievements)
+			}
 			body.add("tiers", snap.tiers);
 			final int hash = snap.completedHash;
 			api.postCombatAchievements(body, new Callback()
@@ -2125,7 +2428,7 @@ public class RuneToolsPlugin extends Plugin
 				@Override
 				public void onFailure(Call call, IOException ex)
 				{
-					noteSyncFailure();
+					noteFailure(EP_COMBAT_ACHIEVEMENTS, payload);
 					log.debug("RuneTools: CA sync failed: {}", ex.getMessage());
 				}
 
@@ -2134,8 +2437,9 @@ public class RuneToolsPlugin extends Plugin
 				{
 					try (Response r = resp)
 					{
-						noteSyncResult(r, EP_COMBAT_ACHIEVEMENTS, identity, payload);
-						if (r.isSuccessful())
+						SyncResponse.Outcome outcome = noteSyncResult(r, EP_COMBAT_ACHIEVEMENTS, identity, payload,
+							SyncResponse.Shape.OK_TRUE, 0, false);
+						if (outcome == SyncResponse.Outcome.OK && identity.equals(syncIdentity()))
 						{
 							caCatalogSent = true;
 							caCompletedHash = hash;
@@ -2153,6 +2457,11 @@ public class RuneToolsPlugin extends Plugin
 	 */
 	private void pollImportedLayouts()
 	{
+		if (!running || !config.syncSetups() || !remoteConfig.on("layouts_apply") || !syncAllowed()
+			|| !backoff.allowed(EP_BANK_LAYOUTS, System.currentTimeMillis()))
+		{
+			return;
+		}
 		final String identity = syncIdentity();
 		if (parking.isParked(EP_BANK_LAYOUTS, identity, 0L))
 		{
@@ -2164,7 +2473,7 @@ public class RuneToolsPlugin extends Plugin
 			@Override
 			public void onFailure(Call call, IOException ex)
 			{
-				noteSyncFailure();
+				noteFailure(EP_BANK_LAYOUTS, 0L);
 				log.debug("RuneTools: layout sync failed: {}", ex.getMessage());
 			}
 
@@ -2173,14 +2482,15 @@ public class RuneToolsPlugin extends Plugin
 			{
 				try (Response r = resp)
 				{
-					noteSyncResult(r, EP_BANK_LAYOUTS, identity, 0L);
-					if (r.code() == 304 || r.code() == 401 || !r.isSuccessful())
+					SyncResponse.Outcome outcome = noteSyncResult(r, EP_BANK_LAYOUTS, identity, 0L,
+						SyncResponse.Shape.LAYOUTS, 0, false);
+					if (r.code() == 304 || outcome != SyncResponse.Outcome.OK || !identity.equals(syncIdentity()))
 					{
 						return;
 					}
 					String body = RuneToolsApiClient.readBoundedBody(r);
 					JsonObject o = new JsonParser().parse(body).getAsJsonObject();
-					String received = o.has("etag") && !o.get("etag").isJsonNull() ? o.get("etag").getAsString() : null;
+					String received = o.has("etag") && !o.get("etag").isJsonNull() ? str(o, "etag", null) : null;
 					if (received != null)
 					{
 						layoutsEtag = received;
@@ -2189,29 +2499,14 @@ public class RuneToolsPlugin extends Plugin
 					{
 						remotePoll.onChanged();   // something was added on the site; more may follow
 					}
-					JsonArray arr = o.getAsJsonArray("layouts");
-					if (arr == null)
-					{
-						return;
-					}
 					Set<String> applied = readAppliedLayouts();
 					boolean changed = false;
-					int processed = 0;
 					// Only the newest whole bank import applies (rows come oldest first); older ones
 					// it replaces are marked done without being built.
 					JsonObject bankImport = null;
 					String bankImportId = null;
-					for (JsonElement e : arr)
+					for (JsonObject l : newestImported(o.getAsJsonArray("layouts"), MAX_IMPORTED_LAYOUTS_PER_POLL))
 					{
-						if (++processed > MAX_IMPORTED_LAYOUTS_PER_POLL)
-						{
-							break;
-						}
-						JsonObject l = e.getAsJsonObject();
-						if (!l.has("imported") || l.get("imported").isJsonNull() || !l.get("imported").getAsBoolean())
-						{
-							continue;    // only auto-apply layouts imported from someone else
-						}
 						String id = str(l, "id", null);
 						if (id != null)
 						{
@@ -2239,7 +2534,7 @@ public class RuneToolsPlugin extends Plugin
 							bankImportId = id;
 							continue;
 						}
-						JsonArray cells = l.getAsJsonArray("cells");
+						JsonArray cells = l.has("cells") && l.get("cells").isJsonArray() ? l.getAsJsonArray("cells") : null;
 						if (cells == null || cells.size() == 0)
 						{
 							continue;
@@ -2258,7 +2553,7 @@ public class RuneToolsPlugin extends Plugin
 						try
 						{
 							bankOrganizer.applyImportedLayout(name, icon, cellsToArray(cells));
-							panel.setBankStatus("Imported \"" + name + "\" - added as a bank tab.", true);
+							panel.setBankStatus("Imported \"" + name + "\" as a bank tab.", true);
 						}
 						catch (RuntimeException ex)
 						{
@@ -2280,6 +2575,44 @@ public class RuneToolsPlugin extends Plugin
 				}
 			}
 		});
+	}
+
+	/**
+	 * The layouts imported from someone else (a {@code source_code}, or the older {@code imported}
+	 * flag), at most {@code max} of them, the newest ones, returned oldest first. The player's own
+	 * exports never count toward the cap, so they can't crowd a new import out.
+	 */
+	static List<JsonObject> newestImported(JsonArray rows, int max)
+	{
+		List<JsonObject> out = new ArrayList<>();
+		if (rows == null)
+		{
+			return out;
+		}
+		for (int i = rows.size() - 1; i >= 0 && out.size() < max; i--)
+		{
+			JsonElement e = rows.get(i);
+			if (e == null || !e.isJsonObject())
+			{
+				continue;
+			}
+			JsonObject l = e.getAsJsonObject();
+			String source = str(l, "source_code", null);
+			boolean imported = (source != null && !source.trim().isEmpty()) || isTrue(l, "imported");
+			if (imported)
+			{
+				out.add(l);
+			}
+		}
+		Collections.reverse(out);
+		return out;
+	}
+
+	/** A JSON boolean field that is true; anything else (missing, null, a string) is false. */
+	private static boolean isTrue(JsonObject o, String key)
+	{
+		JsonElement e = o.get(key);
+		return e != null && e.isJsonPrimitive() && e.getAsJsonPrimitive().isBoolean() && e.getAsBoolean();
 	}
 
 	/**
@@ -2360,9 +2693,9 @@ public class RuneToolsPlugin extends Plugin
 		clientThread.invoke(() ->
 		{
 			Set<String> applied = readAppliedLayouts();
-			if (applied.contains(id))
+			if (!running || applied.contains(id))
 			{
-				return;   // a second poll got here first
+				return;   // switched off, or a second poll got here first
 			}
 			ItemContainer bank = client.getItemContainer(InventoryID.BANK);
 			if (bank == null)
@@ -2438,7 +2771,84 @@ public class RuneToolsPlugin extends Plugin
 
 	private void openHistory()
 	{
-		LinkBrowser.browse(api.base() + "/trades");
+		openSignedIn("/trades");
+	}
+
+	/**
+	 * Open a page of the site signed in when that's possible: through a one-time browser-login code
+	 * (web-login) asked for with {@code next}, so an account with no email doesn't land signed out.
+	 * The {@code next} path also rides the link itself; a server that doesn't honour it yet lands on its
+	 * home page, signed in. Anything else (no key, no consent, an account with an email, no answer)
+	 * opens the page directly, as before.
+	 */
+	private void openSignedIn(String next)
+	{
+		final String direct = api.base() + next;
+		if (!config.consent() || !remoteConfig.on("web_login") || activeApiKey() == null || api.validBase() == null)
+		{
+			browseSafe(direct);
+			return;
+		}
+		clientThread.invoke(() ->
+		{
+			Player p = client.getGameState() == GameState.LOGGED_IN ? client.getLocalPlayer() : null;
+			final String rsn = p != null ? p.getName() : null;
+			if (rsn == null || rsn.isEmpty() || !isMainGame())
+			{
+				browseSafe(direct);
+				return;
+			}
+			api.webLogin(currentHash(), rsn, next, new Callback()
+			{
+				@Override
+				public void onFailure(Call call, IOException ex)
+				{
+					browseSafe(direct);
+				}
+
+				@Override
+				public void onResponse(Call call, Response resp)
+				{
+					String open = direct;
+					try (Response r = resp)
+					{
+						if (r.isSuccessful())
+						{
+							String url = str(new JsonParser().parse(RuneToolsApiClient.readBoundedBody(r))
+								.getAsJsonObject(), "url", null);
+							if (url != null && url.startsWith("/") && !url.startsWith("//"))
+							{
+								String full = api.base() + url;
+								if (!full.contains("next="))
+								{
+									full += (full.contains("?") ? "&" : "?") + "next="
+										+ URLEncoder.encode(next, StandardCharsets.UTF_8);
+								}
+								open = full;
+							}
+						}
+					}
+					catch (Exception ex)
+					{
+						log.debug("RuneTools: couldn't read the sign-in link (HTTP {})", resp.code());
+					}
+					browseSafe(open);
+				}
+			});
+		});
+	}
+
+	/** Open a link in the browser, only if it is on the configured server. */
+	private void browseSafe(String url)
+	{
+		if (isSafeShareUrl(url))
+		{
+			SwingUtilities.invokeLater(() -> LinkBrowser.browse(url));
+		}
+		else
+		{
+			panel.showMessage(api.validBase() == null ? RuneToolsApiClient.BAD_URL_MESSAGE : "Couldn't open the site.", false);
+		}
 	}
 
 	/**
@@ -2452,12 +2862,10 @@ public class RuneToolsPlugin extends Plugin
 			runOrganize(BankOrganizer.Mode.REBUILD);
 			return;
 		}
-		Object[] options = {"Rebuild", "File new items only", "Cancel"};
+		Object[] options = {"Rebuild", "File new items", "Cancel"};
 		int choice = JOptionPane.showOptionDialog(panel,
-			"<html>You've already organized your bank.<br><br>"
-				+ "<b>Rebuild</b> re-sorts from scratch and <b>resets any manual edits</b> you've made to "
-				+ "the RuneTools tabs.<br>"
-				+ "<b>File new items only</b> keeps your edits and just files items you've gained since.</html>",
+			"<html>Rebuild re-sorts every tab and resets your edits to them.<br>"
+				+ "File new items keeps your edits and files what you've gained since.</html>",
 			"Organize bank", JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE,
 			null, options, options[1]);
 		if (choice == 0)
@@ -2476,10 +2884,12 @@ public class RuneToolsPlugin extends Plugin
 		panel.setBankStatus(mode == BankOrganizer.Mode.FILE_NEW ? "Filing new items…" : "Organizing…", true);
 		clientThread.invoke(() ->
 		{
-			ItemContainer bank = client.getItemContainer(InventoryID.BANK);
+			ItemContainer bank = client.getGameState() == GameState.LOGGED_IN
+				? client.getItemContainer(InventoryID.BANK) : null;
 			if (bank == null)
 			{
-				panel.setBankStatus("Open your bank once, then try again.", false);
+				panel.setBankStatus(client.getGameState() == GameState.LOGGED_IN
+					? "Open your bank, then try again." : MSG_LOG_IN, false);
 				return;
 			}
 			List<Integer> ids = new ArrayList<>();
@@ -2571,11 +2981,11 @@ public class RuneToolsPlugin extends Plugin
 			}
 			breakdown.sort((a, b) -> Long.compare(b.price, a.price));   // dearest first
 			final String text = bank == null
-				? "Open your bank once to check for missing items."
+				? "Open your bank to check what's missing."
 				: missing == 0
-					? "You own every item in this setup ✓"
+					? "You own every item."
 					: "Missing " + missing + " item" + (missing == 1 ? "" : "s")
-						+ " · ~" + String.format("%,d", cost) + " gp to buy";
+						+ " · ~" + String.format("%,d", cost) + " gp";
 			final RuneToolsPanel.MissingResult result = new RuneToolsPanel.MissingResult(
 				text, bank != null ? breakdown : Collections.emptyList());
 			SwingUtilities.invokeLater(() -> onResult.accept(result));
@@ -2597,16 +3007,18 @@ public class RuneToolsPlugin extends Plugin
 	{
 		clientThread.invoke(() ->
 		{
-			ItemContainer bank = client.getItemContainer(InventoryID.BANK);
+			ItemContainer bank = client.getGameState() == GameState.LOGGED_IN
+				? client.getItemContainer(InventoryID.BANK) : null;
 			if (bank == null)
 			{
-				panel.setBankStatus("Open your bank first.", false);
+				panel.setBankStatus(client.getGameState() == GameState.LOGGED_IN ? "Open your bank first." : MSG_LOG_IN,
+					false);
 				return;
 			}
 			int tab = client.getVarbitValue(VarbitID.BANK_CURRENTTAB);
 			if (tab < 1 || tab > BANK_TAB_COUNTS.length)
 			{
-				panel.setBankStatus("Open a numbered bank tab (1-9) first, then convert.", false);
+				panel.setBankStatus("Open a numbered bank tab (1 to 9) first.", false);
 				return;
 			}
 			int offset = 0;
@@ -2625,7 +3037,7 @@ public class RuneToolsPlugin extends Plugin
 					ids.add(id);
 				}
 			}
-			bankOrganizer.saveTabAsTag(name, ids, msg -> panel.setBankStatus(msg, true));
+			bankOrganizer.saveTabAsTag(name, ids, panel::setBankStatus);
 		});
 	}
 
@@ -2636,9 +3048,8 @@ public class RuneToolsPlugin extends Plugin
 	 */
 	private void exportWholeBank()
 	{
-		if (!hasKeyAndConsent())
+		if (!mayPublishLayout())
 		{
-			panel.setBankStatus("Enable consent in settings before sharing to the site.", false);
 			return;
 		}
 		clientThread.invoke(() ->
@@ -2646,7 +3057,7 @@ public class RuneToolsPlugin extends Plugin
 			ItemContainer bank = client.getItemContainer(InventoryID.BANK);
 			if (bank == null)
 			{
-				panel.setBankStatus("Open your bank once, then share it.", false);
+				panel.setBankStatus("Open your bank, then share it.", false);
 				return;
 			}
 			Item[] items = bank.getItems();
@@ -2689,7 +3100,7 @@ public class RuneToolsPlugin extends Plugin
 			}
 			if (tabs.size() == 0)
 			{
-				panel.setBankStatus("Your bank looks empty - nothing to share.", false);
+				panel.setBankStatus("Your bank is empty.", false);
 				return;
 			}
 			Player me = client.getLocalPlayer();
@@ -2699,16 +3110,15 @@ public class RuneToolsPlugin extends Plugin
 			SwingUtilities.invokeLater(() ->
 			{
 				JTextField name = new JTextField(suggested, 20);
-				JCheckBox listed = new JCheckBox("List it publicly so anyone can find and import it", true);
+				JCheckBox listed = new JCheckBox("Public: anyone can find and import it", true);
 				JPanel form = new JPanel();
 				form.setLayout(new BoxLayout(form, BoxLayout.Y_AXIS));
 				form.add(new JLabel("Name:"));
 				form.add(name);
 				form.add(listed);
-				form.add(new JLabel("<html>Shares which items sit where (" + total + " items in " + tabCount
-					+ " tab" + (tabCount == 1 ? "" : "s") + "), never quantities.<br>Unticked, only you can "
-					+ "see it, on your profile.</html>"));
-				int ok = JOptionPane.showConfirmDialog(panel, form, "Share my whole bank layout",
+				form.add(new JLabel("<html>" + total + " items in " + tabCount + " tab" + (tabCount == 1 ? "" : "s")
+					+ ". Positions only, never quantities.</html>"));
+				int ok = JOptionPane.showConfirmDialog(panel, form, "Share whole bank",
 					JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
 				if (ok != JOptionPane.OK_OPTION || name.getText().trim().isEmpty())
 				{
@@ -2733,17 +3143,16 @@ public class RuneToolsPlugin extends Plugin
 	 */
 	private void exportBankTag()
 	{
-		if (!hasKeyAndConsent())
+		if (!mayPublishLayout())
 		{
-			panel.setBankStatus("Enable consent in settings before exporting to the site.", false);
 			return;
 		}
 		clientThread.invoke(() ->
 		{
 			String tag = bankTagsService.getActiveTag();
-			if (tag == null || tag.isEmpty())
+			if (tag == null || tag.isEmpty() || tag.startsWith(BankFilterController.TAG_PREFIX))
 			{
-				panel.setBankStatus("Open one of your bank tabs in-game first, then export.", false);
+				panel.setBankStatus("Open a tag tab in your bank first (Save tab as tag makes one).", false);
 				return;
 			}
 			JsonArray cells = new JsonArray();
@@ -2778,13 +3187,13 @@ public class RuneToolsPlugin extends Plugin
 			}
 			if (cells.size() == 0)
 			{
-				panel.setBankStatus("That tab has no items to export.", false);
+				panel.setBankStatus("That tab is empty.", false);
 				return;
 			}
 			int icon = cells.get(0).getAsJsonObject().get("item_id").getAsInt();
 			SwingUtilities.invokeLater(() ->
 			{
-				String name = JOptionPane.showInputDialog(panel, "Name this shared layout:", tag);
+				String name = JOptionPane.showInputDialog(panel, "Layout name:", tag);
 				if (name == null || name.trim().isEmpty())
 				{
 					return;
@@ -2799,6 +3208,29 @@ public class RuneToolsPlugin extends Plugin
 		});
 	}
 
+	/**
+	 * Whether a layout may be published now; when not, the message says why (consent, no key, the
+	 * world, the site pausing it, an old build).
+	 */
+	private boolean mayPublishLayout()
+	{
+		if (blockedByConsent())
+		{
+			return false;
+		}
+		if (writesPaused())
+		{
+			panel.setBankStatus(MSG_UPDATE, false);
+			return false;
+		}
+		if (!remoteConfig.on("layouts_publish"))
+		{
+			panel.setBankStatus(MSG_PAUSED, false);
+			return false;
+		}
+		return true;
+	}
+
 	/** Handles a layout export's answer. A private one has no public page, so it opens "My layouts". */
 	private Callback bankLayoutCallback(boolean isPublic)
 	{
@@ -2807,7 +3239,7 @@ public class RuneToolsPlugin extends Plugin
 			@Override
 			public void onFailure(Call call, IOException ex)
 			{
-				panel.setBankStatus("Export failed - are you online and connected?", false);
+				panel.setBankStatus(SyncResponse.describe(0, null, "Couldn't publish the layout."), false);
 			}
 
 			@Override
@@ -2815,53 +3247,38 @@ public class RuneToolsPlugin extends Plugin
 			{
 				try (Response r = resp)
 				{
-					if (r.isSuccessful())
+					String s = RuneToolsApiClient.bodyOrEmpty(r);
+					if (r.isSuccessful() && SyncResponse.confirms(SyncResponse.Shape.OBJECT, s, 0))
 					{
-						String url = null;
-						try
-						{
-							String s = RuneToolsApiClient.readBoundedBody(r);
-							url = new JsonParser().parse(s).getAsJsonObject().get("url").getAsString();
-						}
-						catch (Exception ignored)
-						{
-							// no URL in body - still a success
-						}
+						String url = str(new JsonParser().parse(s).getAsJsonObject(), "url", null);
 						// Only auto-open/copy a link that points at our own (or the configured dev)
 						// server. A malicious/compromised responder must not be able to drive the
 						// browser to an arbitrary phishing URL or poison the clipboard.
 						final String u = isSafeShareUrl(url) ? url : null;
-						SwingUtilities.invokeLater(() ->
+						if (!isPublic)
 						{
-							if (!isPublic)
-							{
-								panel.setBankStatus("Saved privately - opening your layouts…", true);
-								LinkBrowser.browse(api.base() + "/layouts/mine");
-							}
-							else if (u != null)
-							{
-								copyToClipboard(u);
-								panel.setBankStatus("Published! Link copied - opening your layout…", true);
-								LinkBrowser.browse(u);
-							}
-							else
-							{
-								panel.setBankStatus("Published to your profile.", true);
-							}
-						});
-					}
-					else if (r.code() == 401)
-					{
-						panel.setBankStatus("Connect your API key first (Test connection).", false);
+							panel.setBankStatus("Saved privately.", true);
+							openSignedIn("/layouts/mine");
+						}
+						else if (u != null)
+						{
+							copyToClipboard(u);
+							panel.setBankStatus("Published. Link copied.", true);
+							SwingUtilities.invokeLater(() -> LinkBrowser.browse(u));
+						}
+						else
+						{
+							panel.setBankStatus("Published to your profile.", true);
+						}
 					}
 					else
 					{
-						panel.setBankStatus("Export rejected (HTTP " + r.code() + ").", false);
+						panel.setBankStatus(SyncResponse.describe(r.code(), s, "Couldn't publish the layout."), false);
 					}
 				}
 				catch (Exception ex)
 				{
-					panel.setBankStatus("Export failed.", false);
+					panel.setBankStatus("Couldn't publish the layout. Unexpected answer from the site.", false);
 				}
 			}
 		};
@@ -2883,9 +3300,10 @@ public class RuneToolsPlugin extends Plugin
 	{
 		if (panel != null)
 		{
-			panel.setSessionProfit(sessionTracker.realizedProfit());
-			panel.setRecentTrades(sessionTracker.recent());
-			panel.setOfferSummary(activeOffers);
+			SessionTracker session = chars.session();
+			panel.setSessionProfit(session.realizedProfit());
+			panel.setRecentTrades(session.recent());
+			panel.setOfferSummary(chars.owner() != null ? activeOffers : 0);
 		}
 	}
 
@@ -2893,7 +3311,7 @@ public class RuneToolsPlugin extends Plugin
 
 	private void addCurrentSetup(String name)
 	{
-		if (blockedByConsent())
+		if (!maySaveSetups())
 		{
 			return;
 		}
@@ -2901,6 +3319,7 @@ public class RuneToolsPlugin extends Plugin
 		{
 			if (client.getGameState() != GameState.LOGGED_IN)
 			{
+				panel.showMessage(MSG_LOG_IN, false);
 				return;
 			}
 			GearSetup s = loadoutReader.snapshot();
@@ -2909,19 +3328,19 @@ public class RuneToolsPlugin extends Plugin
 		});
 	}
 
-	/** Create a RuneTools setup from one imported out of the Inventory Setups plugin (saved to the site). */
-	private void importInventorySetup(GearSetup s)
+	/** Save setups imported from the Inventory Setups plugin, one after another (see SetupManager). */
+	private void importInventorySetups(List<GearSetup> list)
 	{
-		if (s == null || blockedByConsent())
+		if (list == null || list.isEmpty() || !maySaveSetups())
 		{
 			return;
 		}
-		setupManager.pushCreate(s);
+		setupManager.importMany(list);
 	}
 
 	private void updateFromGear(GearSetup current)
 	{
-		if (blockedByConsent())
+		if (!maySaveSetups())
 		{
 			return;
 		}
@@ -2929,6 +3348,7 @@ public class RuneToolsPlugin extends Plugin
 		{
 			if (client.getGameState() != GameState.LOGGED_IN)
 			{
+				panel.showMessage(MSG_LOG_IN, false);
 				return;
 			}
 			// Refresh only the physical loadout; keep the setup's identity and all its metadata.
@@ -2940,49 +3360,148 @@ public class RuneToolsPlugin extends Plugin
 			fresh.setSource(current.getSource());
 			fresh.setStyle(current.getStyle());
 			fresh.setMonsterId(current.getMonsterId());
+			fresh.setCollections(current.getCollections());
 			setupManager.pushUpdate(fresh);
 		});
 	}
 
+	/** An edit made in the panel (Swing thread); SetupManager serialises it here, at once. */
 	private void pushSetup(GearSetup s)
 	{
-		if (blockedByConsent())
-		{
-			return;
-		}
-		setupManager.pushUpdate(s);
+		setupManager.pushUpdate(s);   // checks maySaveSetups through its host, and reverts if refused
 	}
 
 	private void deleteSetup(long id)
 	{
-		if (blockedByConsent())
-		{
-			return;
-		}
 		setupManager.pushDelete(id);
 	}
 
 	/**
-	 * Guard for user-initiated publish actions: nothing that attaches the API key or uploads
-	 * account/loadout data may fire until consent is on (the disclosure promises exactly this).
-	 * Returns true (and shows why in the panel) when the action must be blocked.
+	 * Whether a setup may be saved to the site now; when not, the message strip says why. Every
+	 * setup write goes through this (SetupManager.Host.mayWrite).
 	 */
-	private boolean blockedByConsent()
+	private boolean maySaveSetups()
 	{
-		if (hasKeyAndConsent())
+		if (blockedByConsent())
 		{
 			return false;
 		}
-		panel.setStatus(activeApiKey() == null
-			? "Connect this character first - click \"Open RuneTools\"."
-			: "Enable consent in settings before syncing.", false);
+		if (writesPaused())
+		{
+			panel.showMessage(MSG_UPDATE, false);
+			return false;
+		}
+		if (!remoteConfig.on("setups_write"))
+		{
+			panel.showMessage(MSG_PAUSED, false);
+			return false;
+		}
 		return true;
 	}
+
+	/**
+	 * Guard for user-initiated publish actions: nothing that attaches the API key or uploads
+	 * account/loadout data may fire until consent is on (the disclosure promises exactly this), the
+	 * character in game is connected, and the world is the main game. Returns true (and shows why in
+	 * the message strip) when the action must be blocked.
+	 */
+	private boolean blockedByConsent()
+	{
+		String why = null;
+		if (!config.consent())
+		{
+			why = "Turn on consent in the RuneTools settings first.";
+		}
+		else if (!snapshot.get().hasIdentity() || client.getGameState() != GameState.LOGGED_IN)
+		{
+			why = loggedIn && !mainGame ? MSG_NOT_HERE : MSG_LOG_IN;
+		}
+		else if (activeApiKey() == null)
+		{
+			why = "Connect this character first: press Connect to RuneTools.";
+		}
+		if (why != null)
+		{
+			panel.showMessage(why, false);
+			return true;
+		}
+		return false;
+	}
+
+	/** What the setups need from the plugin (see SetupManager.Host). */
+	private final SetupManager.Host setupHost = new SetupManager.Host()
+	{
+		@Override
+		public boolean mayPull()
+		{
+			return running && config.syncSetups() && remoteConfig.on("setups_pull") && syncAllowed()
+				&& backoff.allowed(EP_SETUPS, System.currentTimeMillis());
+		}
+
+		@Override
+		public boolean mayWrite()
+		{
+			return running && maySaveSetups();
+		}
+
+		@Override
+		public void pulled(int status, String body, boolean confirmed)
+		{
+			if (!running)
+			{
+				return;
+			}
+			SyncResponse.Outcome outcome;
+			if (status == 0 || (status >= 200 && status < 300 && !confirmed))
+			{
+				outcome = SyncResponse.Outcome.FAILED;
+			}
+			else
+			{
+				outcome = SyncResponse.classify(status, SyncResponse.readsErrorBody(status) ? SyncResponse.errorCode(body) : null);
+			}
+			noteOutcome(outcome, status, body, null, EP_SETUPS, syncIdentity(), 0L, false);
+		}
+
+		@Override
+		public void message(String text, boolean ok)
+		{
+			if (running)
+			{
+				panel.showMessage(text, ok);
+			}
+		}
+
+		@Override
+		public void changed(List<GearSetup> setups)
+		{
+			panel.setSetups(setups);
+		}
+
+		@Override
+		public void deleted(long id)
+		{
+			if (running)
+			{
+				bankFilter.forget(id);
+			}
+		}
+
+		@Override
+		public void remoteChanged()
+		{
+			remotePoll.onChanged();
+		}
+	};
 
 	private void loadSpellbookIcons()
 	{
 		clientThread.invokeLater(() ->
 		{
+			if (!running)
+			{
+				return true;   // switched off: stop retrying
+			}
 			BufferedImage std = spriteManager.getSprite(SpriteID.SideiconsInterface.MAGIC, 0);
 			BufferedImage anc = spriteManager.getSprite(SpriteID.SideiconsInterface.SPELLBOOK_ANCIENT_MAGICKS, 0);
 			BufferedImage lun = spriteManager.getSprite(SpriteID.SideiconsInterface.SPELLBOOK_LUNAR, 0);
@@ -3044,6 +3563,7 @@ public class RuneToolsPlugin extends Plugin
 		{
 			configManager.setConfiguration(RuneToolsConfig.GROUP, keyConfigKey(hash), key.trim());
 			resumeSync();   // a freshly-issued key is the fix for a rejected one: start syncing again
+			backoff.clear();
 		}
 	}
 
@@ -3054,9 +3574,9 @@ public class RuneToolsPlugin extends Plugin
 
 	private void flushTrades()
 	{
-		if (!config.syncTrades())
+		if (!config.syncTrades() || !uploadsOn("trades"))
 		{
-			return;
+			return;   // kept queued
 		}
 		List<Trade> batch;
 		synchronized (pending)
@@ -3067,43 +3587,45 @@ public class RuneToolsPlugin extends Plugin
 			}
 			batch = new ArrayList<>(pending);
 		}
-		// Group by account so a batch is attributed correctly even across an account switch. A
-		// trade captured before its RSN was known is backfilled with the current identity.
+		// One upload per character, each with that character's own key: a fill always lands in the
+		// account of the character that made it (TradeGroups). Fills with no key here stay queued.
+		long now = System.currentTimeMillis();
 		AccountSnapshot snap = snapshot.get();
-		String curRsn = snap.rsn;
-		String curHash = snap.accountHash;
-		Map<String, List<Trade>> byRsn = new LinkedHashMap<>();
-		Map<String, String> hashByRsn = new HashMap<>();
-		for (Trade t : batch)
+		TradeGroups.Plan plan = TradeGroups.plan(batch, this::keyForHash, snap.accountHash, snap.rsn, now);
+		if (!plan.expired.isEmpty())
 		{
-			String rsn = t.getRsn() != null ? t.getRsn() : curRsn;
-			String key = rsn == null ? "" : rsn;
-			byRsn.computeIfAbsent(key, k -> new ArrayList<>()).add(t);
-			String hash = t.getAccountHash() != null ? t.getAccountHash() : curHash;
-			if (hash != null)
+			synchronized (pending)
 			{
-				hashByRsn.putIfAbsent(key, hash);
+				pending.removeAll(plan.expired);
 			}
+			savePending();
+			updatePanelStatic();
+			log.debug("RuneTools: dropped {} queued fill(s) with no key for over 30 days", plan.expired.size());
 		}
-		for (Map.Entry<String, List<Trade>> entry : byRsn.entrySet())
+		String activeKey = activeApiKey();
+		for (TradeGroups.Group g : plan.send)
 		{
-			List<Trade> group = entry.getValue();
-			String rsn = entry.getKey().isEmpty() ? null : entry.getKey();
-			String hash = hashByRsn.get(entry.getKey());
-			final String endpoint = EP_TRADES + entry.getKey();
-			final String identity = syncIdentity(rsn, hash);
+			final String endpoint = EP_TRADES + g.accountHash;
+			final String identity = syncIdentity(g.rsn, g.accountHash, g.key);
+			final List<Trade> group = g.trades;
 			final long payload = group.hashCode();
-			if (parking.isParked(endpoint, identity, payload))
+			final boolean foreign = !g.key.equals(activeKey);
+			if (!backoff.allowed(endpoint, now) || parking.isParked(endpoint, identity, payload))
 			{
-				continue;   // refused before; the fills stay queued until the character, key or batch changes
+				continue;   // backing off, or refused before: the fills stay queued
 			}
-			log.debug("RuneTools: flushing {} trade(s) to {}", group.size(), api.base());
-			api.postTrades(rsn, hash, group, new Callback()
+			if (!tradesInFlight.add(endpoint))
+			{
+				continue;   // this character's previous upload hasn't answered yet
+			}
+			log.debug("RuneTools: flushing {} trade(s)", group.size());
+			api.postTrades(g.key, g.rsn, g.accountHash, group, new Callback()
 			{
 				@Override
 				public void onFailure(Call call, IOException ex)
 				{
-					noteSyncFailure();
+					tradesInFlight.remove(endpoint);
+					noteFailure(endpoint, payload);
 					log.debug("RuneTools: trade sync failed (will retry): {}", ex.getMessage());
 				}
 
@@ -3112,32 +3634,27 @@ public class RuneToolsPlugin extends Plugin
 				{
 					try (Response r = resp)
 					{
-						SyncResponse.Outcome outcome = noteSyncResult(r, endpoint, identity, payload);
-						if (r.isSuccessful())
+						SyncResponse.Outcome outcome = noteSyncResult(r, endpoint, identity, payload,
+							SyncResponse.Shape.TRADES, group.size(), foreign);
+						if (outcome == SyncResponse.Outcome.OK)
 						{
+							// Dropped only now the server has confirmed it received exactly these.
 							synchronized (pending)
 							{
 								pending.removeAll(group);
 							}
 							savePending();
-							panel.setLastSync(nowString());
 							updatePanelStatic();
 							log.debug("RuneTools: synced {} trade(s) OK", group.size());
 						}
-						else if (r.code() == 401)
-						{
-							panel.setStatus(SYNC_REVOKED_MSG, false);
-							log.debug("RuneTools: trade sync rejected (401) - bad/revoked key");
-						}
-						else if (outcome == SyncResponse.Outcome.NAME_TAKEN
-							|| outcome == SyncResponse.Outcome.PAYLOAD_REJECTED)
-						{
-							log.debug("RuneTools: trade sync HTTP {} - fills kept queued, not resent as-is", r.code());
-						}
 						else
 						{
-							log.debug("RuneTools: trade sync HTTP {} (will retry)", r.code());
+							log.debug("RuneTools: trade sync HTTP {} - fills kept queued", r.code());
 						}
+					}
+					finally
+					{
+						tradesInFlight.remove(endpoint);
 					}
 				}
 			});
@@ -3146,13 +3663,13 @@ public class RuneToolsPlugin extends Plugin
 
 	private void flushState()
 	{
-		if (!config.syncState())
+		if (!config.syncState() || !uploadsOn("state") || !stateDirty.get())
 		{
 			return;
 		}
-		if (!stateDirty.get())
+		if (!backoff.allowed(EP_STATE, System.currentTimeMillis()))
 		{
-			return;
+			return;   // left dirty: sent once the endpoint may go again
 		}
 		final String identity = syncIdentity();
 		if (parking.isNameParked(EP_STATE, identity))
@@ -3161,9 +3678,18 @@ public class RuneToolsPlugin extends Plugin
 		}
 		// Clear up-front so a change that lands mid-request re-marks it dirty and is not lost.
 		stateDirty.set(false);
-		// Send one coherent, immutable cut. The payload hash leaves out the capture time, which
-		// differs on every send, so a refused state is recognised if nothing has changed since.
-		JsonObject body = RuneToolsApiClient.stateBody(snapshot.get());
+		// Send one coherent, immutable cut. The bank goes only when it changed since the server last
+		// accepted one (the server keeps the last bank when it's left out), and only with Include bank
+		// on. The payload hash leaves out the capture time, which differs on every send.
+		AccountSnapshot snap = snapshot.get();
+		boolean includeBank = config.syncBank() && remoteConfig.on("bank") && snap.bank != null;
+		final int bankHash = includeBank ? snap.bank.toString().hashCode() : 0;
+		if (includeBank && chars.bankAlreadySent(bankHash))
+		{
+			includeBank = false;
+		}
+		final boolean sentBank = includeBank;
+		JsonObject body = RuneToolsApiClient.stateBody(snap, includeBank);
 		final long payload = body.toString().hashCode();
 		if (parking.isParked(EP_STATE, identity, payload))
 		{
@@ -3176,7 +3702,7 @@ public class RuneToolsPlugin extends Plugin
 			public void onFailure(Call call, IOException ex)
 			{
 				stateDirty.set(true);
-				noteSyncFailure();
+				noteFailure(EP_STATE, payload);
 				log.debug("RuneTools: state sync failed (will retry): {}", ex.getMessage());
 			}
 
@@ -3185,15 +3711,15 @@ public class RuneToolsPlugin extends Plugin
 			{
 				try (Response r = resp)
 				{
-					SyncResponse.Outcome outcome = noteSyncResult(r, EP_STATE, identity, payload);
-					if (r.isSuccessful())
+					SyncResponse.Outcome outcome = noteSyncResult(r, EP_STATE, identity, payload,
+						SyncResponse.Shape.OK_TRUE, 0, false);
+					if (outcome == SyncResponse.Outcome.OK)
 					{
+						if (sentBank && identity.equals(syncIdentity()))
+						{
+							chars.bankSent(bankHash);
+						}
 						log.debug("RuneTools: state synced OK");
-					}
-					else if (r.code() == 401)
-					{
-						panel.setStatus(SYNC_REVOKED_MSG, false);
-						log.debug("RuneTools: state sync rejected (401) - bad/revoked key");
 					}
 					else if (outcome == SyncResponse.Outcome.PAYLOAD_REJECTED)
 					{
@@ -3217,16 +3743,22 @@ public class RuneToolsPlugin extends Plugin
 	 * browser-login code with this character's stored key and opens the site signed in. The site only
 	 * does that for an account the key already opens and that has no email, and it never creates an
 	 * account or hands out a key here. Otherwise it answers 403 with a reason: "email_signin" opens the
-	 * account page (the browser signs in with the email), and anything else ("pair": no working key
-	 * for this character) starts {@link #startPairing pairing}, which a person approves in the
-	 * browser. The game account hash alone never opens an account. Consent-gated, since it links this
-	 * character's name + account hash to a RuneTools account.
+	 * account page (the browser signs in with the email), and "pair" (or an older server's
+	 * "email_locked": no working key for this character) starts {@link #startPairing pairing}, which a
+	 * person approves in the browser. Any other answer is shown as it is. The game account hash alone
+	 * never opens an account. Consent-gated, since it links this character's name + account hash to a
+	 * RuneTools account.
 	 */
 	private void openSiteLogin()
 	{
 		if (!config.consent())
 		{
-			panel.setStatus("Enable consent in settings to connect your account.", false);
+			panel.showMessage("Turn on consent in the RuneTools settings first.", false);
+			return;
+		}
+		if (api.validBase() == null)
+		{
+			panel.showMessage(RuneToolsApiClient.BAD_URL_MESSAGE, false);
 			return;
 		}
 		clientThread.invoke(() ->
@@ -3236,18 +3768,35 @@ public class RuneToolsPlugin extends Plugin
 			if (rsn == null || rsn.isEmpty())
 			{
 				// No character yet: nothing to sign in as, so just open the site.
-				SwingUtilities.invokeLater(() -> LinkBrowser.browse(api.base() + "/"));
+				browseSafe(api.base() + "/");
 				return;
 			}
-			long ah = client.getAccountHash();
-			final String accountHash = ah == -1 ? null : Long.toString(ah);
-			panel.setStatus("Opening the site…", true);
-			api.webLogin(accountHash, rsn, new Callback()
+			if (!isMainGame())
+			{
+				panel.showMessage(MSG_NOT_HERE, false);
+				return;
+			}
+			final String accountHash = currentHash();
+			if (!remoteConfig.on("web_login"))
+			{
+				// The site has paused browser sign-in: connect if this character has no key, else just open it.
+				if (keyForHash(accountHash) == null)
+				{
+					startPairing(accountHash, rsn);
+				}
+				else
+				{
+					browseSafe(api.base() + "/");
+				}
+				return;
+			}
+			panel.showMessage("Opening the site…", true);
+			api.webLogin(accountHash, rsn, null, new Callback()
 			{
 				@Override
 				public void onFailure(Call call, IOException ex)
 				{
-					panel.setStatus("Couldn't reach the site - are you online?", false);
+					panel.showMessage(SyncResponse.describe(0, null, "Couldn't open the site."), false);
 				}
 
 				@Override
@@ -3255,62 +3804,53 @@ public class RuneToolsPlugin extends Plugin
 				{
 					try (Response r = resp)
 					{
+						String body = RuneToolsApiClient.bodyOrEmpty(r);
 						if (r.code() == 403)
 						{
-							String why = "";
-							try
-							{
-								why = str(new JsonParser().parse(RuneToolsApiClient.readBoundedBody(r)).getAsJsonObject(), "code", "");
-							}
-							catch (Exception ignored)
-							{
-								// not JSON: treat it like the old answer
-							}
+							String why = SyncResponse.errorCode(body);
 							if ("email_signin".equals(why))
 							{
 								// Nothing is wrong: the character is connected and syncing, but an account
 								// with an email signs the browser in with that, never with the plugin's key.
-								// Open the account page (it offers Sign in when the browser isn't), and put
-								// the panel back to "Connected as ..." rather than leaving a red message.
+								panel.clearMessage();
 								updatePanelStatic();
-								SwingUtilities.invokeLater(() -> LinkBrowser.browse(api.base() + "/account"));
+								browseSafe(api.base() + "/account");
+							}
+							else if ("pair".equals(why) || "email_locked".equals(why))
+							{
+								// No working key for this character here: connect it by approving it in the browser.
+								startPairing(accountHash, rsn);
 							}
 							else
 							{
-								// No working key for this character here ("pair", or an older server's
-								// "email_locked"): connect it by approving it in the browser.
-								startPairing(accountHash, rsn);
+								panel.showMessage(SyncResponse.describe(403, body, "Couldn't open the site."), false);
 							}
 							return;
 						}
-						if (!r.isSuccessful())
+						if (!r.isSuccessful() || !SyncResponse.confirms(SyncResponse.Shape.OBJECT, body, 0))
 						{
-							panel.setStatus("Sign-in failed (HTTP " + r.code() + ").", false);
+							panel.showMessage(SyncResponse.describe(r.code(), body, "Couldn't open the site."), false);
 							return;
 						}
-						JsonObject o = new JsonParser().parse(RuneToolsApiClient.readBoundedBody(r)).getAsJsonObject();
-						String url = str(o, "url", null);
+						String url = str(new JsonParser().parse(body).getAsJsonObject(), "url", null);
 						// Only ever open a link to our own (configured) server - never an arbitrary URL.
-						final String full = url != null ? api.base() + url : null;
+						final String full = url != null && url.startsWith("/") ? api.base() + url : null;
 						if (full != null && isSafeShareUrl(full))
 						{
-							SwingUtilities.invokeLater(() ->
-							{
-								panel.setStatus("Opening the site in your browser…", true);
-								LinkBrowser.browse(full);
-							});
+							panel.clearMessage();
+							browseSafe(full);
 						}
 						else
 						{
-							panel.setStatus("Signed in - open runetools.com to view your account.", true);
+							panel.showMessage("Signed in. Open runetools.com to view your account.", true);
 						}
 					}
 					catch (Exception ex)
 					{
 						// Never the body: it holds a one-time sign-in code.
-						log.warn("RuneTools: couldn't read the site's answer to Connect (HTTP {}, {}): {}",
-							resp.code(), resp.header("Content-Type"), ex.toString());
-						panel.setStatus("Unexpected response from the site (" + ex.getClass().getSimpleName() + ").", false);
+						log.warn("RuneTools: couldn't read the site's answer to Connect (HTTP {}, {})",
+							resp.code(), resp.header("Content-Type"));
+						panel.showMessage("Couldn't open the site. Unexpected answer from the site.", false);
 					}
 				}
 			});
@@ -3328,6 +3868,7 @@ public class RuneToolsPlugin extends Plugin
 		final String rsn;
 		final long expiresAtMillis;
 		final AtomicBoolean inFlight = new AtomicBoolean();
+		volatile long lastPollAt;
 
 		Pairing(String pollToken, String userCode, String accountHash, String rsn, long expiresAtMillis)
 		{
@@ -3345,17 +3886,22 @@ public class RuneToolsPlugin extends Plugin
 	 * Ask the site to pair this client, show the code, and open the approve page. There the player
 	 * checks the code matches, then approves it into the account they're signed into, signs in or
 	 * creates one, or continues without an email; {@link #pollPairing} then receives this
-	 * character's key.
+	 * character's key. The code stays in the message strip, where no background sync overwrites it.
 	 */
 	private void startPairing(String accountHash, String rsn)
 	{
-		panel.setStatus("Opening the site to approve this connection…", true);
+		if (!remoteConfig.on("pairing"))
+		{
+			panel.showMessage(MSG_PAUSED, false);
+			return;
+		}
+		panel.showMessage("Opening the site to approve this connection…", true);
 		api.pairStart(accountHash, rsn, new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException ex)
 			{
-				panel.setStatus("Couldn't reach the site - are you online?", false);
+				panel.showMessage(SyncResponse.describe(0, null, "Couldn't start connecting."), false);
 			}
 
 			@Override
@@ -3363,26 +3909,27 @@ public class RuneToolsPlugin extends Plugin
 			{
 				try (Response r = resp)
 				{
-					if (!r.isSuccessful())
+					String body = RuneToolsApiClient.bodyOrEmpty(r);
+					if (!r.isSuccessful() || !SyncResponse.confirms(SyncResponse.Shape.OBJECT, body, 0))
 					{
-						panel.setStatus("Couldn't start connecting (HTTP " + r.code() + "). Try again shortly.", false);
+						panel.showMessage(SyncResponse.describe(r.code(), body, "Couldn't start connecting."), false);
 						return;
 					}
-					JsonObject o = new JsonParser().parse(RuneToolsApiClient.readBoundedBody(r)).getAsJsonObject();
+					JsonObject o = new JsonParser().parse(body).getAsJsonObject();
 					String token = str(o, "poll_token", null);
-					String code = str(o, "user_code", null);
+					String code = RemoteConfig.clean(str(o, "user_code", null), 16);
 					String url = str(o, "url", null);
-					long ttl = o.has("expires_in") ? o.get("expires_in").getAsLong() : 600L;
-					if (token == null || code == null)
+					long ttl = Math.max(30L, Math.min(3600L, asInt(o, "expires_in", 600)));
+					if (token == null || code.isEmpty())
 					{
 						log.warn("RuneTools: the site's answer to pairing had no code (HTTP {})", r.code());
-						panel.setStatus("Unexpected response from the site (no pairing code).", false);
+						panel.showMessage("Couldn't start connecting. Unexpected answer from the site.", false);
 						return;
 					}
 					pairing.set(new Pairing(token, code, accountHash, rsn, System.currentTimeMillis() + ttl * 1000L));
-					panel.setStatus("Approve this client on the site. Your code: " + code, true);
+					panel.showMessage("Approve this connection on the site. Code: " + code, true);
 					// Only ever open a page on our own (configured) server.
-					final String full = url != null ? api.base() + url : null;
+					final String full = url != null && url.startsWith("/") ? api.base() + url : null;
 					if (full != null && isSafeShareUrl(full))
 					{
 						SwingUtilities.invokeLater(() -> LinkBrowser.browse(full));
@@ -3390,9 +3937,9 @@ public class RuneToolsPlugin extends Plugin
 				}
 				catch (Exception ex)
 				{
-					log.warn("RuneTools: couldn't read the site's answer to pairing (HTTP {}, {}): {}",
-						resp.code(), resp.header("Content-Type"), ex.toString());
-					panel.setStatus("Unexpected response from the site (" + ex.getClass().getSimpleName() + ").", false);
+					log.warn("RuneTools: couldn't read the site's answer to pairing (HTTP {}, {})",
+						resp.code(), resp.header("Content-Type"));
+					panel.showMessage("Couldn't start connecting. Unexpected answer from the site.", false);
 				}
 			}
 		});
@@ -3403,7 +3950,7 @@ public class RuneToolsPlugin extends Plugin
 	public void pollPairing()
 	{
 		final Pairing p = pairing.get();
-		if (p == null)
+		if (p == null || !running)
 		{
 			return;
 		}
@@ -3414,20 +3961,26 @@ public class RuneToolsPlugin extends Plugin
 		if (!config.consent() || state == GameState.LOGIN_SCREEN || state == GameState.LOGIN_SCREEN_AUTHENTICATOR
 			|| (playing != null && p.accountHash != null && !playing.equals(p.accountHash)))
 		{
-			pairing.compareAndSet(p, null);
-			panel.setStatus("Connecting was cancelled - click Connect to try again.", false);
+			if (pairing.compareAndSet(p, null))
+			{
+				panel.showMessage("Connecting was cancelled. Press Connect to try again.", false);
+			}
 			return;
 		}
-		if (System.currentTimeMillis() > p.expiresAtMillis)
+		long now = System.currentTimeMillis();
+		if (now > p.expiresAtMillis)
 		{
-			pairing.compareAndSet(p, null);
-			panel.setStatus("The connection request expired - click Connect to try again.", false);
+			if (pairing.compareAndSet(p, null))
+			{
+				panel.showMessage("The connection request expired. Press Connect to try again.", false);
+			}
 			return;
 		}
-		if (!p.inFlight.compareAndSet(false, true))
+		if (now - p.lastPollAt < remoteConfig.limitMs("pair_poll_s") - 500L || !p.inFlight.compareAndSet(false, true))
 		{
-			return;   // the last poll hasn't answered yet
+			return;   // the site asked for a slower poll, or the last one hasn't answered yet
 		}
+		p.lastPollAt = now;
 		api.pairPoll(p.pollToken, new Callback()
 		{
 			@Override
@@ -3443,8 +3996,10 @@ public class RuneToolsPlugin extends Plugin
 				{
 					if (r.code() == 410)
 					{
-						pairing.compareAndSet(p, null);
-						panel.setStatus("The connection request expired - click Connect to try again.", false);
+						if (pairing.compareAndSet(p, null))
+						{
+							panel.showMessage("The connection request expired. Press Connect to try again.", false);
+						}
 						return;
 					}
 					if (!r.isSuccessful())
@@ -3453,17 +4008,17 @@ public class RuneToolsPlugin extends Plugin
 					}
 					JsonObject o = new JsonParser().parse(RuneToolsApiClient.readBoundedBody(r)).getAsJsonObject();
 					String key = str(o, "api_key", null);
-					if ("approved".equals(str(o, "status", "")) && key != null && key.startsWith("rtk_"))
+					if ("approved".equals(str(o, "status", "")) && key != null && key.startsWith("rtk_")
+						&& pairing.compareAndSet(p, null))
 					{
-						pairing.compareAndSet(p, null);
 						storeKeyForHash(p.accountHash, key);
 						updatePanelStatic();   // "Connected as ..."
-						panel.setStatus("Connected" + (p.rsn != null ? " as " + p.rsn : "") + ".", true);
+						panel.showMessage("Connected" + (p.rsn != null ? " as " + p.rsn : "") + ".", true);
 					}
 				}
 				catch (Exception ex)
 				{
-					log.debug("RuneTools: pairing poll failed", ex);
+					log.debug("RuneTools: pairing poll failed: {}", ex.getMessage());
 				}
 				finally
 				{
@@ -3510,6 +4065,7 @@ public class RuneToolsPlugin extends Plugin
 			// button), so re-add it each time - the same as the Wiki plugin - rather than dedup-guard;
 			// otherwise toggling to Set Bonus and back would leave our button gone until reopen.
 			dpsButton = null;
+			dpsWidgets.clear();
 			addDpsButton();
 		}
 		catch (RuntimeException ex)
@@ -3524,6 +4080,7 @@ public class RuneToolsPlugin extends Plugin
 		if (e.getGroupId() == EQUIP_GROUP)
 		{
 			dpsButton = null;   // dynamic children are destroyed with the interface; allow a fresh add
+			dpsWidgets.clear();
 		}
 		else if (e.getGroupId() == InterfaceID.COLLECTION)
 		{
@@ -3560,19 +4117,21 @@ public class RuneToolsPlugin extends Plugin
 		int bgHeight = h - ref[0].getOriginalHeight();
 		int bgX = x + ref[0].getOriginalX() + (w - bgWidth) / 2;
 		int bgY = y + ref[0].getOriginalY() + (h - bgHeight) / 2;
-		parent.createChild(-1, WidgetType.GRAPHIC)
+		Widget bg = parent.createChild(-1, WidgetType.GRAPHIC)
 			.setSpriteId(ref[0].getSpriteId())
 			.setPos(bgX, bgY)
-			.setSize(bgWidth, bgHeight)
-			.revalidate();
+			.setSize(bgWidth, bgHeight);
+		bg.revalidate();
+		dpsWidgets.add(bg);
 
 		for (int i = 1; i < 9; i++)
 		{
-			parent.createChild(-1, WidgetType.GRAPHIC)
+			Widget piece = parent.createChild(-1, WidgetType.GRAPHIC)
 				.setSpriteId(ref[i].getSpriteId())
 				.setSize(ref[i].getOriginalWidth(), ref[i].getOriginalHeight())
-				.setPos(x + ref[i].getOriginalX(), y + ref[i].getOriginalY())
-				.revalidate();
+				.setPos(x + ref[i].getOriginalX(), y + ref[i].getOriginalY());
+			piece.revalidate();
+			dpsWidgets.add(piece);
 		}
 
 		final Widget text = parent.createChild(-1, WidgetType.TEXT)
@@ -3588,10 +4147,49 @@ public class RuneToolsPlugin extends Plugin
 		text.setOnMouseOverListener((JavaScriptCallback) ev -> text.setTextColor(DPS_BTN_HOVER));
 		text.setOnMouseLeaveListener((JavaScriptCallback) ev -> text.setTextColor(DPS_BTN_COLOUR));
 		text.setAction(0, "View DPS with RuneTools");
-		text.setOnOpListener((JavaScriptCallback) ev -> checkDps());
+		text.setOnOpListener((JavaScriptCallback) ev ->
+		{
+			if (running)
+			{
+				checkDps();
+			}
+		});
 		text.revalidate();
 		parent.revalidate();
+		dpsWidgets.add(text);
 		dpsButton = text;
+	}
+
+	/**
+	 * Take our button out of the equipment interface when the plugin is switched off: every widget it
+	 * is made of is hidden and stops listening, so nothing of it stays on screen or clickable. The
+	 * interface drops these dynamic children itself the next time it is drawn.
+	 */
+	private void removeDpsButton()
+	{
+		clientThread.invoke(() ->
+		{
+			for (Widget w : dpsWidgets)
+			{
+				try
+				{
+					w.setHidden(true);
+					w.setHasListener(false);
+					w.setAction(0, null);
+				}
+				catch (RuntimeException ex)
+				{
+					log.debug("RuneTools: couldn't hide the equipment DPS button: {}", ex.toString());
+				}
+			}
+			dpsWidgets.clear();
+			dpsButton = null;
+			Widget parent = client.getWidget(EQUIP_PARENT);
+			if (parent != null)
+			{
+				parent.revalidate();
+			}
+		});
 	}
 
 	/**
@@ -3606,13 +4204,13 @@ public class RuneToolsPlugin extends Plugin
 		{
 			if (client.getGameState() != GameState.LOGGED_IN)
 			{
-				panel.setStatus("Log into the game first, then check DPS.", false);
+				panel.showMessage(MSG_LOG_IN, false);
 				return;
 			}
 			ItemContainer eq = client.getItemContainer(InventoryID.WORN);
 			if (eq == null)
 			{
-				panel.setStatus("Equip some gear first, then check DPS.", false);
+				panel.showMessage("Wear some gear first.", false);
 				return;
 			}
 			// Send an explicit slot->id map plus the combat style, not a flat id list. The site then
@@ -3640,7 +4238,7 @@ public class RuneToolsPlugin extends Plugin
 			}
 			if (gear.length() == 0)
 			{
-				panel.setStatus("Equip some gear first, then check DPS.", false);
+				panel.showMessage("Wear some gear first.", false);
 				return;
 			}
 			String url = api.base() + "/calculators/dps?gear=" + gear;
@@ -3648,12 +4246,7 @@ public class RuneToolsPlugin extends Plugin
 			{
 				url += "&style=" + style;
 			}
-			if (isSafeShareUrl(url))
-			{
-				panel.setStatus("Opening the DPS calculator with your gear…", true);
-				final String open = url;
-				SwingUtilities.invokeLater(() -> LinkBrowser.browse(open));
-			}
+			browseSafe(url);
 		});
 	}
 
@@ -3732,10 +4325,28 @@ public class RuneToolsPlugin extends Plugin
 		// "Connect to RuneTools" - re-linking the character is exactly what mints a working key.
 		// Before login the character isn't known yet, so there is nothing to connect: "Open RuneTools".
 		boolean known = snapshot.get().hasIdentity();
+		boolean offWorld = loggedIn && !mainGame;
 		panel.setConnectButton(!known || (linked && !authRevoked));   // "Connect to RuneTools" vs "Open RuneTools"
-		if (!known)
+		String reason = known ? parking.parkedReason(syncIdentity()) : null;
+		if (api.validBase() == null)
 		{
-			panel.setStatus("Log in to the game: connected characters sync by themselves", true);
+			panel.setStatus(RuneToolsApiClient.BAD_URL_MESSAGE, false);
+		}
+		else if (writesPaused())
+		{
+			panel.setStatus(MSG_UPDATE, false);
+		}
+		else if (offWorld)
+		{
+			panel.setStatus(MSG_NOT_HERE, false);
+		}
+		else if (!known)
+		{
+			panel.setStatus("Log in to the game. Connected characters sync by themselves.", true);
+		}
+		else if (!config.consent())
+		{
+			panel.setStatus("Turn on consent in the RuneTools settings.", false);
 		}
 		else if (!linked)
 		{
@@ -3747,20 +4358,24 @@ public class RuneToolsPlugin extends Plugin
 			// only message that tells the user why nothing is syncing any more.
 			panel.setStatus(SYNC_REVOKED_MSG, false);
 		}
-		else if (!config.consent())
+		else if (reason != null)
 		{
-			panel.setStatus("Enable consent in settings", false);
-		}
-		else if (parking.anyNameParked(syncIdentity()))
-		{
-			// Sticky for the same reason: the key works and other syncs carry on, but the ones published
-			// under the in-game name (Collection Log, Combat Achievements) are held, and this says why.
-			panel.setStatus(SYNC_NAME_TAKEN_MSG, false);
+			// Sticky for the same reason: the key works and other syncs carry on, but some are held
+			// (a name linked to another account, or a limit), and this says why in the server's words.
+			panel.setStatus(reason.isEmpty() ? SYNC_NAME_TAKEN_MSG : reason, false);
 		}
 		else
 		{
 			panel.setStatus("Connected as " + snapshot.get().rsn, true);
 		}
+		// The CA and Collection Log views say why they can't sync instead of giving advice that wouldn't work.
+		String gate = offWorld ? MSG_NOT_HERE
+			: !known ? "Log in to the game."
+			: !config.consent() ? "Turn on consent in the RuneTools settings."
+			: !linked || authRevoked ? "Connect this character."
+			: null;
+		panel.setGates(gate != null ? gate : config.syncCombatAchievements() ? null : "Sync off",
+			gate != null ? gate : config.syncCollectionLog() ? null : "Sync off");
 	}
 
 	// -- persistence of the unsynced-trade queue ----------------------------- //
@@ -3800,7 +4415,7 @@ public class RuneToolsPlugin extends Plugin
 	{
 		try
 		{
-			String raw = configManager.getConfiguration(RuneToolsConfig.GROUP, PENDING_KEY);
+			String raw = debounced.get(PENDING_KEY);
 			if (raw == null || raw.isEmpty())
 			{
 				return;
@@ -3821,6 +4436,10 @@ public class RuneToolsPlugin extends Plugin
 		catch (Exception ex)
 		{
 			log.debug("Could not load pending trades: {}", ex.getMessage());
+			synchronized (pending)
+			{
+				pending.clear();
+			}
 		}
 	}
 
@@ -3828,9 +4447,10 @@ public class RuneToolsPlugin extends Plugin
 	{
 		try
 		{
-			// Build the snapshot AND write it under the same lock, so two threads calling
+			// Build the snapshot and hand it over under the same lock, so two threads calling
 			// savePending() (client thread on capture; OkHttp thread after a flush) can't
-			// interleave and let a stale, larger queue overwrite a just-flushed one.
+			// interleave and let a stale, larger queue overwrite a just-flushed one. The write itself
+			// happens a moment later, once, from DebouncedConfig.
 			synchronized (pending)
 			{
 				JsonArray arr = new JsonArray();
@@ -3838,14 +4458,7 @@ public class RuneToolsPlugin extends Plugin
 				{
 					arr.add(t.toPendingJson());
 				}
-				if (arr.size() == 0)
-				{
-					configManager.unsetConfiguration(RuneToolsConfig.GROUP, PENDING_KEY);
-				}
-				else
-				{
-					configManager.setConfiguration(RuneToolsConfig.GROUP, PENDING_KEY, arr.toString());
-				}
+				debounced.set(PENDING_KEY, arr.size() == 0 ? null : arr.toString());
 			}
 		}
 		catch (Exception ex)
@@ -3882,28 +4495,109 @@ public class RuneToolsPlugin extends Plugin
 		}
 	}
 
-	/** Strip control characters and cap length - server strings must not carry control chars into a UI/notification. */
-	private static String clean(String s, int max)
+	// -- the site's settings for the plugin (RemoteConfig) ------------------- //
+
+	/** The last good copy cached in this plugin's config, or the defaults. */
+	private RemoteConfig cachedRemoteConfig()
 	{
-		if (s == null)
+		RemoteConfig rc = RemoteConfig.parse(configManager.getConfiguration(RuneToolsConfig.GROUP, CONFIG_CACHE_KEY));
+		return rc != null ? rc : RemoteConfig.defaults();
+	}
+
+	/**
+	 * Fetch the site's settings: after consent at login ({@code force}, at most once a minute), when
+	 * the live-update answer names a new config_tag ({@code force}), and every config_s (30 minutes)
+	 * otherwise. A 404 or an answer that isn't a JSON object leaves the last good copy in force.
+	 */
+	private void fetchRemoteConfig(boolean force)
+	{
+		long now = System.currentTimeMillis();
+		long gap = force ? CONFIG_MIN_GAP_MS : remoteConfig.limitMs("config_s");
+		if (!running || !config.consent() || now - lastConfigFetchAt < gap || !configInFlight.compareAndSet(false, true))
 		{
-			return "";
+			return;
 		}
-		StringBuilder sb = new StringBuilder();
-		for (int i = 0; i < s.length() && sb.length() < max; i++)
+		lastConfigFetchAt = now;
+		api.getConfig(new Callback()
 		{
-			int c = s.charAt(i);
-			boolean drop = (c < 0x20) || (c == 0x7f)               // C0 controls + DEL
-				|| (c >= 0x80 && c <= 0x9f)                          // C1 controls
-				|| (c == 0x2028 || c == 0x2029)                      // line / paragraph separators
-				|| (c >= 0x202a && c <= 0x202e)                      // bidi embedding / override
-				|| (c >= 0x2066 && c <= 0x2069);                     // bidi isolate
-			if (!drop)
+			@Override
+			public void onFailure(Call call, IOException ex)
 			{
-				sb.append((char) c);
+				configInFlight.set(false);
 			}
+
+			@Override
+			public void onResponse(Call call, Response resp)
+			{
+				try (Response r = resp)
+				{
+					if (r.code() != 200 || !running)
+					{
+						return;   // no config on this server (404), or not now: keep what we have
+					}
+					RemoteConfig rc = RemoteConfig.parse(RuneToolsApiClient.bodyOrEmpty(r));
+					if (rc != null)
+					{
+						applyRemoteConfig(rc, true);
+					}
+				}
+				finally
+				{
+					configInFlight.set(false);
+				}
+			}
+		});
+	}
+
+	/** Put a remote config in force, cache it, and show its notice. */
+	private void applyRemoteConfig(RemoteConfig rc, boolean cache)
+	{
+		boolean wasPaused = writesPaused();
+		remoteConfig = rc;
+		if (cache)
+		{
+			configManager.setConfiguration(RuneToolsConfig.GROUP, CONFIG_CACHE_KEY, rc.raw());
 		}
-		return sb.toString();
+		remotePoll.setBounds(rc.limitMs("poll_min_s"), rc.limitMs("poll_max_s"));
+		if (!rc.on("live"))
+		{
+			api.cancelLive();
+		}
+		RemoteConfig.Message m = rc.message();
+		if (writesPaused())
+		{
+			panel.setNotice(MSG_UPDATE, "warn", null);
+		}
+		else if (m != null)
+		{
+			final String link = m.link != null ? api.base() + m.link : null;
+			panel.setNotice(m.text, m.level, link != null && isSafeShareUrl(link) ? () -> LinkBrowser.browse(link) : null);
+			announceOnce(m);
+		}
+		else
+		{
+			panel.setNotice(null, null, null);
+		}
+		if (wasPaused != writesPaused())
+		{
+			updatePanelStatic();
+		}
+	}
+
+	/** A notice from the site goes to chat once (per id, ever); it never opens anything by itself. */
+	private void announceOnce(RemoteConfig.Message m)
+	{
+		String seen = configManager.getConfiguration(RuneToolsConfig.GROUP, NOTICE_SEEN_KEY);
+		if (m.id.equals(seen) || !loggedIn)
+		{
+			return;
+		}
+		configManager.setConfiguration(RuneToolsConfig.GROUP, NOTICE_SEEN_KEY, m.id);
+		String msg = new ChatMessageBuilder()
+			.append(ChatColorType.HIGHLIGHT).append("RuneTools: ")
+			.append(ChatColorType.NORMAL).append(Text.escapeJagex(m.text))
+			.build();
+		chatMessageManager.queue(QueuedMessage.builder().type(ChatMessageType.CONSOLE).runeLiteFormattedMessage(msg).build());
 	}
 
 	/**

@@ -4,6 +4,7 @@ import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
+import net.runelite.client.config.Range;
 
 @ConfigGroup(RuneToolsConfig.GROUP)
 public interface RuneToolsConfig extends Config
@@ -25,21 +26,6 @@ public interface RuneToolsConfig extends Config
 	String syncSection = "sync";
 
 	@ConfigItem(
-		keyName = "apiKey",
-		name = "API key",
-		description = "Legacy manual key. You no longer need this - just log in and click \"Open RuneTools\" "
-			+ "in the panel; each character links itself automatically. Kept only for advanced/manual setups.",
-		secret = true,
-		hidden = true,
-		section = connectionSection,
-		position = 0
-	)
-	default String apiKey()
-	{
-		return "";
-	}
-
-	@ConfigItem(
 		keyName = "serverUrl",
 		name = "Server URL",
 		description = "The RuneTools server to sync with. Leave as the default unless you are testing against a local/staging server.",
@@ -59,8 +45,9 @@ public interface RuneToolsConfig extends Config
 		// README's "What it sends" table.
 		warning = "Once enabled, and once you connect a character, this plugin sends the following "
 			+ "to the RuneTools server:\n"
-			+ "- Your character name (RSN), account hash and a capture time, to link the character to "
-			+ "your RuneTools account.\n"
+			+ "- The plugin's version, with every request.\n"
+			+ "- Your character name (RSN), RuneLite account hash and a capture time, to link the character "
+			+ "to your RuneTools account.\n"
 			+ "- Completed Grand Exchange trades (item, buy or sell, quantity, price, time), for "
 			+ "profit tracking.\n"
 			+ "- Your coins (including banked coins once you open your bank), free GE slots, open GE "
@@ -159,8 +146,8 @@ public interface RuneToolsConfig extends Config
 		keyName = "syncCombatAchievements",
 		name = "Sync Combat Achievements",
 		description = "Sync your Combat Achievement tasks and completion to RuneTools to view and plan them on the site.",
-		section = setupsSection,
-		position = 1
+		section = syncSection,
+		position = 3
 	)
 	default boolean syncCombatAchievements()
 	{
@@ -177,8 +164,8 @@ public interface RuneToolsConfig extends Config
 			+ "quantities. When the game announces a new item in chat (\"New item added to your collection "
 			+ "log\"), its name and the time go to your drop timeline straight away. Only works once you "
 			+ "have consented and connected this character.",
-		section = setupsSection,
-		position = 2
+		section = syncSection,
+		position = 4
 	)
 	default boolean syncCollectionLog()
 	{
@@ -190,7 +177,7 @@ public interface RuneToolsConfig extends Config
 		name = "Fuzzy item matching",
 		description = "Match item variations (charged/uncharged, (i), recolours) when filtering the bank, so a banked variant of a setup item still shows.",
 		section = setupsSection,
-		position = 3
+		position = 1
 	)
 	default boolean setupFuzzyMatch()
 	{
@@ -202,7 +189,7 @@ public interface RuneToolsConfig extends Config
 		name = "Arrange bank to setup",
 		description = "Position bank items like the gear setup (equipment on the left, inventory on the right). Off = filter only.",
 		section = setupsSection,
-		position = 4
+		position = 2
 	)
 	default boolean setupBankLayout()
 	{
@@ -294,6 +281,7 @@ public interface RuneToolsConfig extends Config
 		return true;
 	}
 
+	@Range(min = 0)
 	@ConfigItem(
 		keyName = "logMinValue",
 		name = "Smallest drop to log (gp)",

@@ -1,10 +1,14 @@
 package com.runetools;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import net.runelite.api.Client;
 import net.runelite.api.EnumComposition;
 import net.runelite.api.EnumID;
@@ -12,6 +16,7 @@ import net.runelite.api.EquipmentInventorySlot;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.gameval.InventoryID;
+import net.runelite.api.gameval.ItemID;
 import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.game.ItemManager;
@@ -49,6 +54,17 @@ class LoadoutReader
 		VarbitID.RUNE_POUCH_QUANTITY_1, VarbitID.RUNE_POUCH_QUANTITY_2,
 		VarbitID.RUNE_POUCH_QUANTITY_3, VarbitID.RUNE_POUCH_QUANTITY_4,
 	};
+
+	// The pouches whose runes the RUNE_POUCH varbits describe, and the items whose ammo slot the
+	// Dizana's quiver varps describe. Those vars keep their contents when the item is banked, so they
+	// are only read into a setup when one of these is actually carried or worn.
+	static final Set<Integer> RUNE_POUCHES = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+		ItemID.BH_RUNE_POUCH, ItemID.BH_RUNE_POUCH_TROUVER, ItemID.DIVINE_RUNE_POUCH, ItemID.DIVINE_RUNE_POUCH_TROUVER)));
+	static final Set<Integer> QUIVERS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+		ItemID.DIZANAS_QUIVER_UNCHARGED, ItemID.DIZANAS_QUIVER_UNCHARGED_TROUVER,
+		ItemID.DIZANAS_QUIVER_CHARGED, ItemID.DIZANAS_QUIVER_CHARGED_TROUVER,
+		ItemID.DIZANAS_QUIVER_INFINITE, ItemID.DIZANAS_QUIVER_INFINITE_TROUVER,
+		ItemID.SKILLCAPE_MAX_DIZANAS, ItemID.SKILLCAPE_MAX_DIZANAS_TROUVER)));
 
 	private final Client client;
 	private final ItemManager itemManager;
@@ -115,9 +131,9 @@ class LoadoutReader
 		}
 		s.setInventory(invList);
 
-		// (4) rune pouch (scan all 4 slots; empty slots have type 0)
+		// (4) rune pouch (scan all 4 slots; empty slots have type 0), only while a pouch is carried
 		List<GearSetupItem> runes = new ArrayList<>();
-		EnumComposition runeEnum = client.getEnum(EnumID.RUNEPOUCH_RUNE);   // pouch-slot type -> rune item id
+		EnumComposition runeEnum = holds(inv, RUNE_POUCHES) ? client.getEnum(EnumID.RUNEPOUCH_RUNE) : null;
 		if (runeEnum != null)
 		{
 			for (int i = 0; i < RP_TYPE.length; i++)
@@ -136,13 +152,16 @@ class LoadoutReader
 		}
 		s.setRunePouch(runes);
 
-		// (5) Dizana's quiver
+		// (5) Dizana's quiver ammo, only while the quiver (or its max cape) is worn or carried
 		List<GearSetupItem> quiver = new ArrayList<>();
-		int ammoId = client.getVarpValue(VarPlayerID.DIZANAS_QUIVER_TEMP_AMMO);
-		int ammoQty = client.getVarpValue(VarPlayerID.DIZANAS_QUIVER_TEMP_AMMO_AMOUNT);
-		if (ammoId > 0 && ammoQty > 0)
+		if (holds(worn, QUIVERS) || holds(inv, QUIVERS))
 		{
-			quiver.add(new GearSetupItem(ammoId, ammoQty));
+			int ammoId = client.getVarpValue(VarPlayerID.DIZANAS_QUIVER_TEMP_AMMO);
+			int ammoQty = client.getVarpValue(VarPlayerID.DIZANAS_QUIVER_TEMP_AMMO_AMOUNT);
+			if (ammoId > 0 && ammoQty > 0)
+			{
+				quiver.add(new GearSetupItem(ammoId, ammoQty));
+			}
 		}
 		s.setQuiver(quiver);
 
@@ -151,5 +170,22 @@ class LoadoutReader
 		s.setSpellbook(sb >= 0 && sb <= 3 ? sb : -1);
 
 		return s;
+	}
+
+	/** Whether the container holds any of {@code ids}. */
+	private static boolean holds(ItemContainer c, Set<Integer> ids)
+	{
+		if (c == null)
+		{
+			return false;
+		}
+		for (Item it : c.getItems())
+		{
+			if (it != null && ids.contains(it.getId()))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 }
