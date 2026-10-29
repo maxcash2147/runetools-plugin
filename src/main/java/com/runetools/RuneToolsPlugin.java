@@ -418,6 +418,12 @@ public class RuneToolsPlugin extends Plugin
 	{
 		running = true;
 		resetSession();
+		// A sweep that was still running when the plugin was switched off can set one of these after
+		// shutDown cleared it, for a request the closed client then never answers: start clean.
+		liveInFlight.set(false);
+		achievementsInFlight.set(false);
+		configInFlight.set(false);
+		tradesInFlight.clear();
 		migrateServerUrl();
 		debounced = new DebouncedConfig(this::writeConfig,
 			k -> configManager.getConfiguration(RuneToolsConfig.GROUP, k), executor, 2_000L);

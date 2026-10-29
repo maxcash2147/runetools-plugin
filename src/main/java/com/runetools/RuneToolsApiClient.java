@@ -320,6 +320,12 @@ class RuneToolsApiClient
 		}
 		Call call = client.newCall(req);
 		inFlight.add(call);
+		if (closed)
+		{
+			// close() ran while this was being built: it may have missed the call, so it never leaves.
+			inFlight.remove(call);
+			return;
+		}
 		if (live)
 		{
 			liveCall = call;
