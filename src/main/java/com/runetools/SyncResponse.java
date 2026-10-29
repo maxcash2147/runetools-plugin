@@ -185,18 +185,20 @@ final class SyncResponse
 
 	/**
 	 * What to tell the player about a failed request they made: the server's own {@code error} text
-	 * when it sent one, else {@code fallback} with a short reason. {@code status} 0 is no answer.
+	 * when it sent one, else {@code fallback} with a short reason. {@code status} 0 is no answer. A
+	 * rejected key always says so: the site's own text for a 401 is about signing in on the site,
+	 * which is not what fixes it in the plugin.
 	 */
 	static String describe(int status, String body, String fallback)
 	{
+		if (status == 401 || (status == 403 && BAD_KEY.equals(errorCode(body))))
+		{
+			return "Key rejected. Reconnect this character.";
+		}
 		String text = status >= 400 ? errorText(body) : null;
 		if (text != null)
 		{
 			return text;
-		}
-		if (status == 401 || (status == 403 && BAD_KEY.equals(errorCode(body))))
-		{
-			return "Key rejected. Reconnect this character.";
 		}
 		if (status == 429)
 		{

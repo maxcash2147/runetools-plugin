@@ -97,6 +97,11 @@ public class SyncResponseTest
 			SyncResponse.describe(409, limit, "Couldn't save."));
 		Assert.assertEquals("Couldn't save. (HTTP 503)", SyncResponse.describe(503, "<html>down</html>", "Couldn't save."));
 		Assert.assertEquals("Key rejected. Reconnect this character.", SyncResponse.describe(401, "", "Couldn't save."));
+		// the site's 401 body is about signing in on the site, not what the player needs to do here
+		Assert.assertEquals("Key rejected. Reconnect this character.",
+			SyncResponse.describe(401, "{\"error\":\"Sign in to use this feature.\"}", "Couldn't save."));
+		Assert.assertEquals("Key rejected. Reconnect this character.",
+			SyncResponse.describe(403, "{\"error\":\"Bad key\",\"code\":\"bad_key\"}", "Couldn't save."));
 		Assert.assertEquals("Couldn't save. The site didn't answer.", SyncResponse.describe(0, null, "Couldn't save."));
 		Assert.assertEquals("Couldn't save. Unexpected answer from the site.",
 			SyncResponse.describe(200, "<html></html>", "Couldn't save."));
