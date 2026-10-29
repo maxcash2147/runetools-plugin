@@ -425,6 +425,7 @@ public class RuneToolsPlugin extends Plugin
 		achievementsInFlight.set(false);
 		configInFlight.set(false);
 		tradesInFlight.clear();
+		offWorldShown = false;
 		migrateServerUrl();
 		debounced = new DebouncedConfig(this::writeConfig,
 			k -> configManager.getConfiguration(RuneToolsConfig.GROUP, k), executor, 2_000L);
@@ -656,6 +657,7 @@ public class RuneToolsPlugin extends Plugin
 			// Character context is gone; drop identity so we never attribute to the wrong RSN.
 			snapshot.updateAndGet(s -> s.toBuilder().rsn(null).build());
 			identityAnnounced = false;
+			offWorldShown = false;   // the next world (seasonal or not) gets its own status line
 			// Drop any half-read Collection Log: the next character's log must never inherit it.
 			discardCollectionCapture();
 			// Whoever logs in next gets a clean slate: a different character has a different key, and
@@ -1746,7 +1748,7 @@ public class RuneToolsPlugin extends Plugin
 		{
 			return;
 		}
-		if (loggedIn && config.consent())
+		if (loggedIn && mainGame && config.consent())
 		{
 			fetchRemoteConfig(false);   // the site's settings, every half hour (needs no key)
 		}
@@ -3143,9 +3145,9 @@ public class RuneToolsPlugin extends Plugin
 					+ ". Positions only, never quantities.</html>"));
 				int ok = JOptionPane.showConfirmDialog(panel, form, "Share whole bank",
 					JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
-				if (ok != JOptionPane.OK_OPTION || name.getText().trim().isEmpty())
+				if (ok != JOptionPane.OK_OPTION || name.getText().trim().isEmpty() || !mayPublishLayout())
 				{
-					return;
+					return;   // (checked again: the character may have logged out while the dialog was open)
 				}
 				JsonObject body = new JsonObject();
 				body.addProperty("name", name.getText().trim());
@@ -3217,7 +3219,7 @@ public class RuneToolsPlugin extends Plugin
 			SwingUtilities.invokeLater(() ->
 			{
 				String name = JOptionPane.showInputDialog(panel, "Layout name:", tag);
-				if (name == null || name.trim().isEmpty())
+				if (name == null || name.trim().isEmpty() || !mayPublishLayout())
 				{
 					return;
 				}
@@ -3435,8 +3437,9 @@ public class RuneToolsPlugin extends Plugin
 		{
 			why = "Turn on consent in the RuneTools settings first.";
 		}
-		else if (!snapshot.get().hasIdentity() || client.getGameState() != GameState.LOGGED_IN)
+		else if (!snapshot.get().hasIdentity() || client.getGameState() != GameState.LOGGED_IN || !mainGame)
 		{
+			// mainGame too: a PvP Arena or LMS world type can arrive without a hop, which keeps the name
 			why = loggedIn && !mainGame ? MSG_NOT_HERE : MSG_LOG_IN;
 		}
 		else if (activeApiKey() == null)
