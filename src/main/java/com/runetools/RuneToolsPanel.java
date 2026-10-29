@@ -524,7 +524,7 @@ class RuneToolsPanel extends PluginPanel
 			{
 				current.setName(n.trim());
 				detailTitle.setText(n.trim());
-				detailTitle.setToolTipText(n.trim());
+				detailTitle.setToolTipText(plainTip(n.trim()));
 				pushUpdate();
 			}
 		});
@@ -853,7 +853,7 @@ class RuneToolsPanel extends PluginPanel
 		current = s;
 		String title = s.getName() != null ? s.getName() : "Setup";
 		detailTitle.setText(title);
-		detailTitle.setToolTipText(title);   // full name on hover when the row truncates it
+		detailTitle.setToolTipText(plainTip(title));   // full name on hover when the row truncates it
 		fillEquipment();
 		fillInventory();
 		boolean pouch = s.getRunePouch() != null && !s.getRunePouch().isEmpty();
@@ -1324,7 +1324,7 @@ class RuneToolsPanel extends PluginPanel
 
 		JLabel name = noHtml(new JLabel(r.label));
 		name.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-		name.setToolTipText(r.tooltip);   // a role's row names the setup it opens
+		name.setToolTipText(plainTip(r.tooltip));   // a role's row names the setup it opens
 		name.addMouseListener(new MouseAdapter()
 		{
 			@Override
@@ -2362,6 +2362,16 @@ class RuneToolsPanel extends PluginPanel
 			return " ";
 		}
 		return "<html><div style='width:" + width + "pt;text-align:center'>" + htmlEscape(text) + "</div></html>";
+	}
+
+	/**
+	 * A tooltip that shows {@code s} as plain text. A label's html.disable doesn't reach its tooltip,
+	 * and Swing renders a tooltip that starts with "<html>" as HTML (remote images included), so a
+	 * setup name from the site is escaped inside one. Null or empty gives no tooltip.
+	 */
+	static String plainTip(String s)
+	{
+		return s == null || s.isEmpty() ? null : "<html>" + htmlEscape(s) + "</html>";
 	}
 
 	private static JLabel noHtml(JLabel label)

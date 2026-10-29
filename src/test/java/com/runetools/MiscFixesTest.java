@@ -14,6 +14,18 @@ import org.junit.Test;
 public class MiscFixesTest
 {
 	@Test
+	public void aSetupNameInATooltipIsPlainText()
+	{
+		String evil = "<html><img src=http://example.invalid/p.png>";
+		String tip = RuneToolsPanel.plainTip(evil);
+		Assert.assertEquals("<html>&lt;html&gt;&lt;img src=http://example.invalid/p.png&gt;</html>", tip);
+		Assert.assertFalse(tip.contains("<img"));
+		Assert.assertEquals("<html>Tank &amp; Spec</html>", RuneToolsPanel.plainTip("Tank & Spec"));
+		Assert.assertNull(RuneToolsPanel.plainTip(null));
+		Assert.assertNull(RuneToolsPanel.plainTip(""));
+	}
+
+	@Test
 	public void theImportedLayoutCapCountsOnlyImports()
 	{
 		JsonArray rows = new JsonArray();
