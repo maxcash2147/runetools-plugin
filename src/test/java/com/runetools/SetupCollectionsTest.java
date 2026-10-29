@@ -53,6 +53,26 @@ public class SetupCollectionsTest
 	}
 
 	@Test
+	public void aMissingRoleOrOrderStillGroupsTheSetup()
+	{
+		String[] ok = {
+			"\"collection\": {\"id\": 9, \"name\": \"Bandos\", \"order\": 1}",
+			"\"collection\": {\"id\": 9, \"name\": \"Bandos\", \"role\": null, \"order\": 1}",
+			"\"collection\": {\"id\": 9, \"name\": \"Bandos\", \"role\": \"\"}",
+			"\"collection\": {\"id\": 9, \"name\": \"Bandos\", \"order\": null}",
+		};
+		for (String b : ok)
+		{
+			GearSetup g = GearSetup.fromJson(json("{\"id\": 5, \"name\": \"Tank\", " + b + "}"));
+			Assert.assertEquals(b, 1, g.getCollections().size());
+			SetupCollection c = g.getCollections().get(0);
+			Assert.assertEquals(b, 9L, c.getId());
+			Assert.assertEquals(b, "", c.getRole());
+			Assert.assertTrue(b, c.getOrder() == 0 || c.getOrder() == 1);
+		}
+	}
+
+	@Test
 	public void aMalformedCollectionIsNoCollection()
 	{
 		String[] bad = {
@@ -63,10 +83,9 @@ public class SetupCollectionsTest
 			"\"collection\": {\"id\": -1, \"name\": \"x\", \"role\": \"Tank\", \"order\": 1}",
 			"\"collection\": {\"id\": 9, \"name\": 4, \"role\": \"Tank\", \"order\": 1}",
 			"\"collection\": {\"id\": 9, \"name\": \"  \", \"role\": \"Tank\", \"order\": 1}",
-			"\"collection\": {\"id\": 9, \"name\": \"x\", \"order\": 1}",
 			"\"collection\": {\"id\": 9, \"name\": \"x\", \"role\": [], \"order\": 1}",
-			"\"collection\": {\"id\": 9, \"name\": \"x\", \"role\": \"Tank\"}",
 			"\"collection\": {\"id\": 9, \"name\": \"x\", \"role\": \"Tank\", \"order\": \"1\"}",
+			"\"collection\": {\"id\": 9, \"name\": \"x\", \"role\": \"Tank\", \"order\": {}}",
 			"\"collection\": null",
 			"\"collections\": {\"id\": 9}",
 			"\"collections\": [1, \"a\", null, []]",

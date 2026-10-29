@@ -67,7 +67,11 @@ class SetupCollection
 		out.add(c);
 	}
 
-	/** One collection object, or null when any of id, name, role and order is missing or the wrong type. */
+	/**
+	 * One collection object, or null when id or name is missing, or any field is the wrong type. A
+	 * missing (or null) role reads as no role and a missing order as 0, so a site that leaves them out
+	 * still groups the setup.
+	 */
 	static SetupCollection one(JsonElement e)
 	{
 		if (e == null || !e.isJsonObject())
@@ -79,13 +83,13 @@ class SetupCollection
 		JsonPrimitive name = primitive(o, "name");
 		JsonPrimitive role = primitive(o, "role");
 		JsonPrimitive order = primitive(o, "order");
-		if (id == null || !id.isNumber() || name == null || !name.isString() || role == null || !role.isString()
-			|| order == null || !order.isNumber())
+		if (id == null || !id.isNumber() || name == null || !name.isString() || (role != null && !role.isString())
+			|| (order != null && !order.isNumber()) || wrongType(o, "role") || wrongType(o, "order"))
 		{
 			return null;
 		}
 		double idValue = id.getAsDouble();
-		double orderValue = order.getAsDouble();
+		double orderValue = order != null ? order.getAsDouble() : 0d;
 		if (idValue != Math.rint(idValue) || idValue <= 0 || idValue > Long.MAX_VALUE
 			|| orderValue != Math.rint(orderValue) || Math.abs(orderValue) > Integer.MAX_VALUE)
 		{
@@ -96,7 +100,15 @@ class SetupCollection
 		{
 			return null;
 		}
-		return new SetupCollection(id.getAsLong(), n, RemoteConfig.clean(role.getAsString(), 40).trim(), order.getAsInt());
+		String r = role != null ? RemoteConfig.clean(role.getAsString(), 40).trim() : "";
+		return new SetupCollection(id.getAsLong(), n, r, order != null ? order.getAsInt() : 0);
+	}
+
+	/** A field that is there, not null, and not a plain value (an object or an array). */
+	private static boolean wrongType(JsonObject o, String key)
+	{
+		JsonElement e = o.get(key);
+		return e != null && !e.isJsonNull() && !e.isJsonPrimitive();
 	}
 
 	private static JsonPrimitive primitive(JsonObject o, String key)
