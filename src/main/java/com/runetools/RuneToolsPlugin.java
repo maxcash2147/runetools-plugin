@@ -633,6 +633,13 @@ public class RuneToolsPlugin extends Plugin
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged e)
 	{
+		// Logging out: send the XP the last sweep hadn't sent yet, before the session's capture is
+		// dropped below. The Hiscores update at logout, and the site proves a name when they show XP
+		// this plugin sent first, so this last cut proves it on this logout rather than a later one.
+		if (e.getGameState() == GameState.LOGIN_SCREEN && syncAllowed())
+		{
+			flushState();
+		}
 		// The sync loop only runs while a character is in game. LOADING is a region change rather than
 		// a logout, so it leaves the gate alone; every other non-LOGGED_IN state closes it.
 		if (e.getGameState() == GameState.LOGGED_IN)
