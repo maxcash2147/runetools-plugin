@@ -15,7 +15,7 @@ import net.runelite.client.plugins.banktags.tabs.LayoutManager;
 
 /**
  * Filters and (optionally) LAYS OUT the in-game bank to a gear setup, the way Inventory Setups
- * does: build a hidden Bank Tag ({@code _rtsetup_<id>}) of the setup's item ids, save a Bank Tags
+ * does: build a hidden Bank Tag ({@code runetools_setup_<id>}) of the setup's item ids, save a Bank Tags
  * {@link Layout} placing equipment on the left and inventory on the right, then open the tag with
  * that layout. Core Bank Tags does the actual hiding/positioning and re-applies it across redraws.
  *
@@ -24,7 +24,7 @@ import net.runelite.client.plugins.banktags.tabs.LayoutManager;
 @Slf4j
 class BankFilterController
 {
-	static final String TAG_PREFIX = "_rtsetup_";
+	static final String TAG_PREFIX = BankTagNames.of("setup_");
 
 	// Bank is 8 columns wide: pos = row*8 + col. Equipment sits in cols 0-2 (RS worn-slot shape),
 	// inventory in cols 4-7 (col 3 is a gutter).

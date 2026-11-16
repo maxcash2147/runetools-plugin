@@ -3221,7 +3221,7 @@ public class RuneToolsPlugin extends Plugin
 			int icon = cells.get(0).getAsJsonObject().get("item_id").getAsInt();
 			SwingUtilities.invokeLater(() ->
 			{
-				String name = JOptionPane.showInputDialog(panel, "Layout name:", tag);
+				String name = JOptionPane.showInputDialog(panel, "Layout name:", BankTagNames.shown(tag));
 				if (name == null || name.trim().isEmpty() || !mayPublishLayout())
 				{
 					return;

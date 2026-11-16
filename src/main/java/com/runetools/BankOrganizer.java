@@ -41,7 +41,7 @@ class BankOrganizer
 	private static final String KEY_OWNED = "organizedTabs";
 	private static final String KEY_FILED = "organizedFiledItems";   // ids we've filed (for File-new)
 	private static final String KEY_IMPORTED_BANK = "importedBankTabs";   // tabs of the last whole-bank import
-	private static final String ALL_TAG = "All";   // a full-bank tab shown before the category tabs
+	private static final String ALL_TAG = BankTagNames.of("All");   // a full-bank tab shown before the category tabs
 	// Core Bank Tags config: the ordered CSV of tag-tab names the bank rebuilds its tab bar from.
 	private static final int COLS = 8;
 	private static final int MAX_LAYOUT_CELLS = 4096;   // hard cap on an imported layout's grid size
@@ -115,7 +115,7 @@ class BankOrganizer
 		owned.add(ALL_TAG);
 		for (BankCategorizer.CategoryTab ct : tabs)
 		{
-			owned.add(ct.category.label);
+			owned.add(BankTagNames.of(ct.category.label));
 		}
 
 		// Remove only the tabs we previously owned that we no longer want; keep the rest IN PLACE
@@ -148,7 +148,7 @@ class BankOrganizer
 
 		for (BankCategorizer.CategoryTab ct : tabs)
 		{
-			String tag = ct.category.label;
+			String tag = BankTagNames.of(ct.category.label);
 			tagManager.removeTag(tag);                 // refresh membership (adds new items, drops gone)
 			for (List<Integer> group : ct.groups)
 			{
@@ -224,7 +224,7 @@ class BankOrganizer
 
 		for (BankCategorizer.CategoryTab ct : newTabs)
 		{
-			String tag = ct.category.label;
+			String tag = BankTagNames.of(ct.category.label);
 			List<Integer> catIds = flatten(ct.groups);
 			for (int id : catIds)
 			{
@@ -397,8 +397,7 @@ class BankOrganizer
 			tabManager.save();
 			configManager.unsetConfiguration(GROUP, KEY_OWNED);
 			configManager.unsetConfiguration(GROUP, KEY_FILED);
-			String active = bankTags.getActiveTag();
-			if (active != null)
+			if (BankTagNames.ours(bankTags.getActiveTag()))
 			{
 				bankTags.closeBankTag();
 			}
@@ -412,7 +411,7 @@ class BankOrganizer
 
 	/**
 	 * Turn a native bank tab's exact contents (item ids in tab order, passed in by the caller) into a
-	 * standalone Bank Tags tag + layout + tab named {@code name}. This is a user-owned tag - it is NOT
+	 * standalone Bank Tags tag + layout + tab named {@code name} after {@link BankTagNames#PREFIX}. This is a user-owned tag - it is NOT
 	 * tracked in {@link #KEY_OWNED}, so Rebuild/Remove never touch it - and it can be shared straight
 	 * away via core Bank Tags' right-click "Export tag tab". The name is sanitised like any tag name,
 	 * and a tag that already exists is never overwritten: the player is asked for another name.
@@ -427,12 +426,13 @@ class BankOrganizer
 				onStatus.accept("That bank tab is empty.", false);
 				return;
 			}
-			String tag = sanitizeTagName(name);
-			if (tag.isEmpty())
+			String bare = sanitizeTagName(name);
+			if (bare.isEmpty())
 			{
 				onStatus.accept("Enter a name for the tag.", false);
 				return;
 			}
+			String tag = BankTagNames.of(bare);
 			if (tagExists(tag))
 			{
 				onStatus.accept("A tag named \"" + tag + "\" already exists. Pick another name.", false);
@@ -493,7 +493,7 @@ class BankOrganizer
 			}
 			// Never destructively overwrite a tab the user (or the organiser) already owns: an
 			// imported layout reusing an existing tag name gets a fresh, non-colliding name instead.
-			String tag = uniqueTagName(base);
+			String tag = uniqueTagName(BankTagNames.of(base));
 			makeTab(tag, icon, cells, null);
 			tabManager.save();
 			log.debug("RuneTools: applied imported layout \"{}\"", tag);
@@ -580,7 +580,7 @@ class BankOrganizer
 		Set<Integer> placed = new HashSet<>();
 		for (BankTab t : tabs)
 		{
-			String tag = uniqueTagName(sanitizeTagName(prefix + " " + sanitizeTagName(t.name)));
+			String tag = uniqueTagName(BankTagNames.of(sanitizeTagName(prefix + " " + sanitizeTagName(t.name))));
 			if (t.cells != null && t.cells.length > 0 && makeTab(tag, t.icon, t.cells, placed))
 			{
 				made.add(tag);
@@ -589,7 +589,7 @@ class BankOrganizer
 		List<Integer> misc = unplaced(bankItemIds, placed, itemManager::canonicalize);
 		if (!misc.isEmpty())
 		{
-			String tag = uniqueTagName(sanitizeTagName(prefix + " Misc"));
+			String tag = uniqueTagName(BankTagNames.of(sanitizeTagName(prefix + " Misc")));
 			if (makeTab(tag, -1, packGroups(Collections.singletonList(misc)), null))
 			{
 				made.add(tag);
@@ -759,7 +759,10 @@ class BankOrganizer
 		return csv(KEY_OWNED);
 	}
 
-	/** A config value holding a comma-separated list of tag names. */
+	/**
+	 * A config value holding a comma-separated list of tag names, only those named as ours: a list
+	 * saved before the prefix (or edited by hand) can't make this plugin change a player's own tag.
+	 */
 	private List<String> csv(String key)
 	{
 		String raw = configManager.getConfiguration(GROUP, key);
@@ -771,7 +774,7 @@ class BankOrganizer
 		for (String t : raw.split(","))
 		{
 			String s = t.trim();
-			if (!s.isEmpty())
+			if (BankTagNames.ours(s))
 			{
 				out.add(s);
 			}
