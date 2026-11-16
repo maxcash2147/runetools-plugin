@@ -571,6 +571,11 @@ class RuneToolsApiClient
 		{
 			body.add("equipment", s.equipment);
 		}
+		// The looting bag likewise: only once it has been seen this session.
+		if (s.lootingBag != null)
+		{
+			body.add("looting_bag", s.lootingBag);
+		}
 		// Same preserve-if-absent contract for skills.
 		if (s.skills != null)
 		{

@@ -34,6 +34,11 @@ public class StateBodyTest
 		fang.addProperty("item_id", 26219);
 		fang.addProperty("qty", 1);
 		worn.add(fang);
+		JsonArray bag = new JsonArray();
+		JsonObject whip = new JsonObject();
+		whip.addProperty("item_id", 4151);
+		whip.addProperty("qty", 1);
+		bag.add(whip);
 		return AccountSnapshot.empty().toBuilder()
 			.rsn("Zezima")
 			.accountHash("123456789")
@@ -42,6 +47,7 @@ public class StateBodyTest
 			.freeSlots(8)
 			.bank(bank)
 			.equipment(worn)
+			.lootingBag(bag)
 			.skills(skills)
 			.build();
 	}
@@ -53,6 +59,7 @@ public class StateBodyTest
 		Set<String> expected = new HashSet<>(ALWAYS);
 		expected.add("bank");
 		expected.add("equipment");
+		expected.add("looting_bag");
 		expected.add("skills");
 		Assert.assertEquals(expected, body.keySet());
 	}
@@ -73,6 +80,15 @@ public class StateBodyTest
 		AccountSnapshot s = AccountSnapshot.empty().toBuilder().rsn("Zezima").accountHash("1").build();
 		JsonObject body = RuneToolsApiClient.stateBody(s);
 		Assert.assertEquals(ALWAYS, body.keySet());
+	}
+
+	@Test
+	public void aLootingBagSeenEmptyIsSentEmptySoTheServerForgetsWhatWasInIt()
+	{
+		AccountSnapshot s = AccountSnapshot.empty().toBuilder().rsn("Zezima").accountHash("1").lootingBag(new JsonArray()).build();
+		JsonObject body = RuneToolsApiClient.stateBody(s);
+		Assert.assertTrue(body.has("looting_bag"));
+		Assert.assertEquals(0, body.getAsJsonArray("looting_bag").size());
 	}
 
 	@Test

@@ -26,6 +26,9 @@ final class AccountSnapshot
 	// null until captured: what the character is wearing, which is owned gear too (best-in-slot
 	// "from my bank" counts it), sent with the same keep-the-last-one rule as the bank.
 	final JsonArray equipment;
+	// null until captured: what is in the looting bag, seen when the player checks or opens it (an ultimate
+	// ironman keeps gear there). Owned too, with the same keep-the-last-one rule; [] once it is seen empty.
+	final JsonArray lootingBag;
 	// null until captured; {skill: {level, xp}}. Feeds the site's level-aware calculators, and the
 	// exact XP is how the server proves this account plays the in-game name it syncs under.
 	final JsonObject skills;
@@ -41,6 +44,7 @@ final class AccountSnapshot
 		inventory = b.inventory;
 		bank = b.bank;
 		equipment = b.equipment;
+		lootingBag = b.lootingBag;
 		skills = b.skills;
 	}
 
@@ -70,6 +74,7 @@ final class AccountSnapshot
 		private JsonArray inventory = new JsonArray();
 		private JsonArray bank;
 		private JsonArray equipment;
+		private JsonArray lootingBag;
 		private JsonObject skills;
 
 		private Builder()
@@ -87,6 +92,7 @@ final class AccountSnapshot
 			inventory = s.inventory;
 			bank = s.bank;
 			equipment = s.equipment;
+			lootingBag = s.lootingBag;
 			skills = s.skills;
 		}
 
@@ -135,6 +141,12 @@ final class AccountSnapshot
 		Builder bank(JsonArray v)
 		{
 			bank = v;
+			return this;
+		}
+
+		Builder lootingBag(JsonArray v)
+		{
+			lootingBag = v;
 			return this;
 		}
 

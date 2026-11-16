@@ -84,7 +84,7 @@ is moved to `https://runetools.com`. Keys can be revoked on the site.
 | The plugin's version (`X-RuneTools-Plugin` and `X-RuneTools-Api` headers) | with every request | so the site can answer each version the way it expects |
 | Your in-game name, your RuneLite account hash (an ID RuneLite gives the game account) and a capture time | with every sync | link the character to your site account |
 | Completed GE fills (item, buy/sell, qty, unit price, time) | as they fill | automatic P/L tracking |
-| Coins (in your inventory and, once you open your bank, your banked coins), free GE slots, open GE offers, inventory, the gear you're wearing, members-world flag | when they change while playing | bankroll- and slot-aware flip suggestions, and best-in-slot from the gear you own |
+| Coins (in your inventory and, once you open your bank, your banked coins), free GE slots, open GE offers, inventory, the gear you're wearing, your looting bag's contents once you check or open it, members-world flag | when they change while playing | bankroll- and slot-aware flip suggestions, and best-in-slot from the gear you own |
 | Skill levels & experience | when they change while playing | level-aware calculators, and proving the character is yours: the server compares the exact XP with the official hiscores before any synced data is shown publicly under that name |
 | Combat Achievements (task list + completion) | when they change | the site's CA planner |
 | Collection Log progress counts, your complete obtained set, and the items on pages you open | counts while playing; the obtained set when you open the log in-game | a browsable collection-log replica |
@@ -244,7 +244,7 @@ Every request the plugin makes, all to the configured server, each with the `X-R
   character by approving its code in the browser (only while you're connecting one); the poll that
   sees the approval returns the character's key
 - `POST /api/plugin/trades` - completed GE fills (the server dedupes on `ext_id`)
-- `POST /api/plugin/state` - latest-wins snapshot of gp / offers / inventory / equipment / skills, and
+- `POST /api/plugin/state` - latest-wins snapshot of gp / offers / inventory / equipment / looting bag / skills, and
   the bank when it changed
 - `GET /api/plugin/setups` (ETag) · `POST` · `PUT /{id}` · `DELETE /{id}` - two-way gear-setup sync
 - `GET /api/plugin/changes` - held open by the site until a setup or bank layout is saved there (or

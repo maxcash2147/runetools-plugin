@@ -51,8 +51,9 @@ public interface RuneToolsConfig extends Config
 			+ "- Completed Grand Exchange trades (item, buy or sell, quantity, price, time), for "
 			+ "profit tracking.\n"
 			+ "- Your coins (including banked coins once you open your bank), free GE slots, open GE "
-			+ "offers, inventory, the gear you're wearing and whether you are on a members world, for "
-			+ "flip suggestions that fit your bankroll and best-in-slot from the gear you own.\n"
+			+ "offers, inventory, the gear you're wearing, your looting bag's contents once you check or open "
+			+ "it, and whether you are on a members world, for flip suggestions that fit your bankroll and "
+			+ "best-in-slot from the gear you own.\n"
 			+ "- Your skill levels and experience, for level-aware calculators and to prove the "
 			+ "character is yours (the site checks it against the official hiscores).\n"
 			+ "- Your Combat Achievements (the task list and which tasks you have completed), for the "
@@ -99,7 +100,7 @@ public interface RuneToolsConfig extends Config
 	@ConfigItem(
 		keyName = "syncState",
 		name = "Sync account state",
-		description = "Upload coins, open GE offers and inventory so flip suggestions fit your real bankroll and free slots, "
+		description = "Upload coins, open GE offers, inventory, worn gear and looting bag so flip suggestions fit your real bankroll and free slots, "
 			+ "plus your skill levels and experience for level-aware calculators and to prove the character is yours.",
 		section = syncSection,
 		position = 1

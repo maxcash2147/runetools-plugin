@@ -1242,6 +1242,18 @@ public class RuneToolsPlugin extends Plugin
 			}
 			return;
 		}
+		if (e.getContainerId() == InventoryID.LOOTING_BAG)
+		{
+			// The looting bag's contents, which the game sends when the player checks or opens it: owned gear
+			// too (an ultimate ironman's), so best in slot from your items counts it.
+			final JsonArray bag = itemsToArray(c);
+			if (!bag.equals(snapshot.get().lootingBag))
+			{
+				snapshot.updateAndGet(s -> s.toBuilder().lootingBag(bag).build());
+				stateDirty.set(true);
+			}
+			return;
+		}
 		if (e.getContainerId() == InventoryID.INV)
 		{
 			chars.inventoryCoins = c.count(ItemID.COINS);
@@ -1436,11 +1448,15 @@ public class RuneToolsPlugin extends Plugin
 		final JsonArray bankJson = bankArr;
 		ItemContainer worn = client.getItemContainer(InventoryID.WORN);
 		final JsonArray wornArr = worn != null ? itemsToArray(worn) : null;
+		// (the looting bag only where the game has sent it this session: checked or opened)
+		ItemContainer bag = client.getItemContainer(InventoryID.LOOTING_BAG);
+		final JsonArray bagArr = bag != null ? itemsToArray(bag) : null;
 		final long gp = (long) chars.inventoryCoins + (long) chars.bankCoins;
 		snapshot.updateAndGet(s -> s.toBuilder()
 			.inventory(invArr != null ? invArr : s.inventory)
 			.bank(bankJson != null ? bankJson : s.bank)
 			.equipment(wornArr != null ? wornArr : s.equipment)
+			.lootingBag(bagArr != null ? bagArr : s.lootingBag)
 			.gp(gp)
 			.build());
 		rebuildOffers();
